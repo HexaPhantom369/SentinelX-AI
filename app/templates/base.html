@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0a1018">
+    <title>{% block title %}Overview{% endblock %} | SentinelX</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('web.overview') }}" aria-label="SentinelX overview">
+                <span class="brand-mark" aria-hidden="true">S</span>
+                <span class="brand-copy"><strong>Sentinel<span>X</span></strong><small>SECURITY OPERATIONS</small></span>
+            </a>
+
+            <div class="nav-heading">WORKSPACE</div>
+            <nav class="main-nav">
+                <a class="nav-link is-active" href="{{ url_for('web.overview') }}" aria-current="page">
+                    <span class="nav-glyph" aria-hidden="true">O</span><span>Overview</span>
+                </a>
+                <a class="nav-link" href="#security-events"><span class="nav-glyph" aria-hidden="true">E</span><span>Security events</span><small>Recent</small></a>
+                <a class="nav-link" href="#alerts-view"><span class="nav-glyph" aria-hidden="true">A</span><span>Alerts</span><small>Live</small></a>
+                <a class="nav-link" href="#incidents-view"><span class="nav-glyph" aria-hidden="true">I</span><span>Incidents</span><small>Live</small></a>
+                <a class="nav-link" href="#active-defense"><span class="nav-glyph" aria-hidden="true">D</span><span>Active defense</span><small>Phase 6</small></a>
+                <a class="nav-link" href="#detection-rules"><span class="nav-glyph" aria-hidden="true">R</span><span>Detection rules</span><small>R001–R006</small></a>
+                <a class="nav-link" href="#log-ingestion"><span class="nav-glyph" aria-hidden="true">L</span><span>Log ingestion</span><small>JSON · CSV</small></a>
+                <a class="nav-link" href="#threat-intelligence"><span class="nav-glyph" aria-hidden="true">T</span><span>Threat intelligence</span><small>Phase 5</small></a>
+                <div class="nav-link is-planned"><span class="nav-glyph" aria-hidden="true">AI</span><span>AI analysis</span><small>Later</small></div>
+                <div class="nav-link is-planned"><span class="nav-glyph" aria-hidden="true">P</span><span>Reports</span><small>Later</small></div>
+                <a class="nav-link" href="#settings-view"><span class="nav-glyph" aria-hidden="true">S</span><span>Settings</span><small>Phase 5</small></a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span><strong>Local workspace</strong><small id="sidebar-health">Checking service</small></span>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <header class="topbar">
+                <div class="breadcrumb"><span>Workspace</span><span class="breadcrumb-separator">/</span><strong>Overview</strong></div>
+                <div class="topbar-meta">
+                    <span id="audit-header-badge" class="audit-header-badge audit-header-pending" role="status" title="Verifies the local SHA-256 hash chain; this is tamper-evident, not an external signature.">Audit Chain: Verifying…</span>
+                    <button id="audit-header-verify" class="audit-header-verify" type="button">Re-verify</button>
+                    <span class="environment-pill"><span></span> LOCAL DEVELOPMENT</span><span class="topbar-divider"></span><span class="user-avatar" aria-label="Local workspace">L</span>
+                </div>
+            </header>
+
+            <div class="page-content">
+                {% block content %}{% endblock %}
+            </div>
+            <footer class="page-footer"><span>SentinelX <span id="current-year"></span></span><span>Defensive monitoring workspace <i></i> Phase 6 web-based active defense</span></footer>
+        </main>
+    </div>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}" defer></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+[
+  {"timestamp": "2026-01-15T09:00:00Z", "event_type": "windows_authentication", "outcome": "failure", "username": "demo-user", "source_ip": "192.0.2.41", "host_name": "SENTINELX-WIN-DEMO"},
+  {"timestamp": "2026-01-15T09:01:00Z", "event_type": "windows_authentication", "outcome": "failure", "username": "demo-user", "source_ip": "192.0.2.41", "host_name": "SENTINELX-WIN-DEMO"},
+  {"timestamp": "2026-01-15T09:02:00Z", "event_type": "windows_authentication", "outcome": "failure", "username": "demo-user", "source_ip": "192.0.2.41", "host_name": "SENTINELX-WIN-DEMO"},
+  {"timestamp": "2026-01-15T09:03:00Z", "event_type": "windows_authentication", "outcome": "failure", "username": "demo-user", "source_ip": "192.0.2.41", "host_name": "SENTINELX-WIN-DEMO"},
+  {"timestamp": "2026-01-15T09:04:00Z", "event_type": "windows_authentication", "outcome": "failure", "username": "demo-user", "source_ip": "192.0.2.41", "host_name": "SENTINELX-WIN-DEMO"},
+  {"timestamp": "2026-01-15T09:05:00Z", "event_type": "windows_authentication", "outcome": "success", "username": "demo-user", "source_ip": "192.0.2.41", "host_name": "SENTINELX-WIN-DEMO"}
+]

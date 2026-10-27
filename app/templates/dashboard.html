@@ -1,0 +1,287 @@
+{% extends "base.html" %}
+
+{% block title %}Overview{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+    <div>
+        <div class="eyebrow"><span class="eyebrow-line"></span> SECURITY OPERATIONS CENTER</div>
+        <h1>Overview</h1>
+        <p class="page-description">A clear view of your security posture, backed by the SentinelX database.</p>
+    </div>
+    <div class="updated-label"><span class="live-dot" aria-hidden="true"></span><span id="updated-at">Loading live data</span></div>
+</section>
+
+<div id="dashboard-error" class="notice notice-error" role="alert" hidden>
+    <strong>Dashboard data is unavailable.</strong>
+    <span id="dashboard-error-message">Check that the local service and database are available, then refresh the page.</span>
+</div>
+
+<section class="metrics-grid" aria-label="Security metrics">
+    <article class="metric-card metric-card-primary">
+        <div class="metric-top"><span class="metric-label">SECURITY EVENTS</span><span class="metric-icon metric-icon-blue" aria-hidden="true">EV</span></div>
+        <div class="metric-value" id="metric-events" aria-live="polite">—</div>
+        <div class="metric-foot"><span class="metric-caption">Normalized records in database</span></div>
+    </article>
+    <article class="metric-card">
+        <div class="metric-top"><span class="metric-label">TOTAL ALERTS</span><span class="metric-icon metric-icon-violet" aria-hidden="true">AL</span></div>
+        <div class="metric-value" id="metric-alerts" aria-live="polite">—</div>
+        <div class="metric-foot"><span class="metric-caption">All recorded alert statuses</span></div>
+    </article>
+    <article class="metric-card">
+        <div class="metric-top"><span class="metric-label">ACTIVE CRITICAL / HIGH</span><span class="metric-icon metric-icon-red" aria-hidden="true">!</span></div>
+        <div class="metric-value" id="metric-priority" aria-live="polite">—</div>
+        <div class="metric-foot"><span class="severity-key"><i class="severity-critical"></i><span id="metric-critical">—</span> critical</span><span class="severity-key"><i class="severity-high"></i><span id="metric-high">—</span> high</span></div>
+    </article>
+    <article class="metric-card">
+        <div class="metric-top"><span class="metric-label">OPEN INCIDENTS</span><span class="metric-icon metric-icon-amber" aria-hidden="true">IN</span></div>
+        <div class="metric-value" id="metric-incidents" aria-live="polite">—</div>
+        <div class="metric-foot"><span class="metric-caption">Open, investigating, or contained</span></div>
+    </article>
+</section>
+
+<section class="overview-grid">
+    <article class="panel activity-panel">
+        <div class="panel-heading">
+            <div><div class="panel-kicker">ACTIVITY</div><h2>Security activity</h2></div>
+            <span class="panel-tag">DATABASE COUNTS</span>
+        </div>
+        <div class="empty-state" id="activity-empty" hidden>
+            <div class="empty-illustration" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+            <h3>No security events yet</h3>
+            <p>Upload a validated JSON or CSV log file below to populate this workspace. No sample activity is simulated.</p>
+        </div>
+        <div class="activity-summary" id="activity-summary" hidden>
+            <span class="activity-number" id="activity-count">0</span>
+            <span>events stored</span>
+            <span class="summary-separator"></span>
+            <span class="activity-number" id="activity-rules">0</span>
+            <span>enabled rules</span>
+        </div>
+    </article>
+
+    <article class="panel status-panel">
+        <div class="panel-heading">
+            <div><div class="panel-kicker">SYSTEM</div><h2>Platform status</h2></div>
+            <span class="health-pill"><i></i> <span id="service-status">Checking</span></span>
+        </div>
+        <div class="status-list">
+            <div class="status-row"><span class="status-symbol status-symbol-green">DB</span><span class="status-copy"><strong>Local database</strong><small>SQLite · application instance</small></span><span class="status-value status-value-good" id="database-status">Checking</span></div>
+            <div class="status-row"><span class="status-symbol status-symbol-blue">IN</span><span class="status-copy"><strong>Log ingestion</strong><small id="ingestion-detail">JSON and CSV imports</small></span><span class="status-value" id="ingestion-status">Ready</span></div>
+            <div class="status-row"><span class="status-symbol status-symbol-violet">AI</span><span class="status-copy"><strong>AI analysis</strong><small>Optional evidence summaries · later phase</small></span><span class="status-value" id="ai-status">Not configured</span></div>
+        </div>
+    </article>
+</section>
+
+<section class="panel events-panel" id="security-events">
+    <div class="panel-heading">
+        <div><div class="panel-kicker">TELEMETRY</div><h2>Recent security events</h2></div>
+        <a class="section-link" href="/api/events?limit=50">Browse event API <span aria-hidden="true">↗</span></a>
+    </div>
+    <div id="events-empty" class="table-empty">
+        <span class="table-empty-mark" aria-hidden="true">—</span>
+        <span>Import a JSON or CSV log to see normalized events here.</span>
+    </div>
+    <div class="table-wrap" id="events-table-wrap" hidden>
+        <table>
+            <thead><tr><th>OBSERVED</th><th>EVENT TYPE</th><th>OUTCOME</th><th>USER</th><th>SOURCE IP</th><th>HOST</th></tr></thead>
+            <tbody id="events-table-body"></tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel ingestion-panel" id="log-ingestion">
+    <div class="panel-heading">
+        <div><div class="panel-kicker">DATA INTAKE</div><h2>Import security logs</h2></div>
+        <span class="panel-tag">JSON · CSV · MAX 2 MB</span>
+    </div>
+    <p class="ingestion-description">Upload structured authentication or security events. SentinelX validates each record, stores only normalized security fields, and reports invalid rows and duplicates.</p>
+    <form id="ingestion-form" class="upload-form" enctype="multipart/form-data">
+        <label class="file-picker" for="log-file">
+            <span class="file-picker-icon" aria-hidden="true">↑</span>
+            <span><strong id="file-picker-label">Choose a JSON or CSV file</strong><small>UTF-8 · maximum file size 2 MB</small></span>
+            <input id="log-file" name="file" type="file" accept=".json,.csv,application/json,text/csv" required>
+        </label>
+        <button id="ingestion-submit" class="primary-button" type="submit">Validate and import</button>
+    </form>
+    <div id="ingestion-message" class="ingestion-message" role="status" aria-live="polite" hidden></div>
+    <div id="ingestion-errors" class="ingestion-errors" hidden></div>
+    <p class="privacy-note">Raw log contents and unrecognized fields are not stored. Only event time, type, outcome, username, source IP, and host name are normalized.</p>
+</section>
+
+<section class="panel alerts-panel" id="alerts-view">
+    <div class="panel-heading">
+        <div><div class="panel-kicker">INVESTIGATIONS</div><h2>Recent alerts</h2></div>
+        <button id="run-detections" class="secondary-button" type="button">Run detection rules</button>
+    </div>
+    <div id="alerts-empty" class="table-empty">
+        <span class="table-empty-mark" aria-hidden="true">—</span>
+    <span>No alerts recorded. Run the enabled detection rules against ingested events to create evidence-linked alerts.</span>
+    </div>
+    <div class="table-wrap" id="alerts-table-wrap" hidden>
+        <table>
+            <thead><tr><th>ALERT</th><th>SEVERITY</th><th>DETECTION RULE</th><th>MITRE ATT&amp;CK</th><th>STATUS</th><th>TRIGGERED</th><th>ACTION</th></tr></thead>
+            <tbody id="alerts-table-body"></tbody>
+        </table>
+    </div>
+    <div id="detection-message" class="ingestion-message" role="status" aria-live="polite" hidden></div>
+</section>
+
+<section class="panel remediation-panel" id="active-defense">
+    <div class="panel-heading">
+        <div><div class="panel-kicker">HUMAN-APPROVED RESPONSE</div><h2>Active defense</h2></div>
+        <span class="panel-tag">WINDOWS FIREWALL · LOCAL ONLY</span>
+    </div>
+    <p class="incidents-description">Recommendations are evidence-linked. Firewall changes run only after you type the exact public IP and explicitly approve the action. Review trusted VPNs, proxies, and shared networks before blocking.</p>
+    <div id="remediation-message" class="ingestion-message" role="status" aria-live="polite" hidden></div>
+    <div id="remediation-empty" class="table-empty">Generate an evidence-based recommendation from an alert or incident to see it here.</div>
+    <div id="remediation-list" class="remediation-list"></div>
+</section>
+
+<section class="panel incidents-panel" id="incidents-view">
+    <div class="panel-heading">
+        <div><div class="panel-kicker">CASE MANAGEMENT</div><h2>Incidents</h2></div>
+        <button id="group-incidents" class="secondary-button" type="button">Group related alerts</button>
+    </div>
+    <p class="incidents-description">Related alerts are grouped using shared event evidence or the same host/source/account within 30 minutes. Grouping is repeatable and does not change existing incident statuses.</p>
+    <div id="incidents-empty" class="table-empty">No incidents yet. Run detection rules, then group related alerts.</div>
+    <div class="table-wrap" id="incidents-table-wrap" hidden>
+        <table>
+            <thead><tr><th>INCIDENT</th><th>SEVERITY</th><th>STATE</th><th>ALERTS / EVIDENCE</th><th>UPDATED</th><th>ACTION</th></tr></thead>
+            <tbody id="incidents-table-body"></tbody>
+        </table>
+    </div>
+    <div id="incident-message" class="ingestion-message" role="status" aria-live="polite" hidden></div>
+</section>
+
+<section class="panel threat-intel-panel" id="threat-intelligence">
+    <div class="panel-heading">
+        <div><div class="panel-kicker">REPUTATION ENRICHMENT</div><h2>Threat intelligence</h2></div>
+        <button id="enrich-observed-ips" class="secondary-button" type="button">Enrich active-alert IPs</button>
+    </div>
+    <p class="incidents-description">Only globally routable source IPs linked to active alerts are eligible. Lookups are user-triggered, cached for 24 hours, and may disclose those IP addresses to the selected external provider.</p>
+    <div id="intel-message" class="ingestion-message" role="status" aria-live="polite" hidden></div>
+    <div id="intel-empty" class="table-empty">No reputation lookups recorded.</div>
+    <div class="table-wrap" id="intel-table-wrap" hidden>
+        <table>
+            <thead><tr><th>IP ADDRESS</th><th>PROVIDER</th><th>REPUTATION</th><th>DETAILS</th><th>LOOKED UP</th></tr></thead>
+            <tbody id="intel-table-body"></tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel settings-panel" id="settings-view">
+    <div class="panel-heading">
+        <div><div class="panel-kicker">INTEGRATIONS &amp; SAFETY</div><h2>Settings</h2></div>
+        <span class="panel-tag">LOCAL CONFIGURATION</span>
+    </div>
+    <div class="settings-grid">
+        <section class="settings-card" aria-labelledby="intel-settings-title">
+            <h3 id="intel-settings-title">Threat intelligence provider</h3>
+            <form id="intel-settings-form">
+                <label for="intel-provider">Provider</label>
+                <select id="intel-provider" name="provider">
+                    <option value="disabled">Disabled</option>
+                    <option value="mock">Mock (no external requests)</option>
+                    <option value="abuseipdb">AbuseIPDB</option>
+                    <option value="virustotal">VirusTotal</option>
+                </select>
+                <label class="settings-toggle"><input id="intel-enabled" type="checkbox"> Enable lookups</label>
+                <p id="intel-provider-status" class="privacy-note">Loading provider configuration…</p>
+                <p class="privacy-note">API keys are read only from environment variables; this UI never stores or displays key values. AbuseIPDB: <code>SENTINELX_ABUSEIPDB_API_KEY</code>. VirusTotal: <code>SENTINELX_VIRUSTOTAL_API_KEY</code>.</p>
+                <div class="settings-actions">
+                    <button class="primary-button" type="submit">Save provider</button>
+                    <button id="test-intel-provider" class="secondary-button" type="button">Test connection</button>
+                </div>
+            </form>
+        </section>
+        <section class="settings-card">
+            <h3>Windows host monitor</h3>
+            <p id="host-monitor-status" class="privacy-note">Loading agent configuration…</p>
+            <p class="privacy-note">Set <code>SENTINELX_AGENT_TOKEN</code> in the server environment and restart SentinelX. On the monitored Windows host, set the same value in the current PowerShell session, then run:</p>
+            <pre><code>$env:SENTINELX_AGENT_TOKEN = "your-local-agent-token"
+.\app\host_monitor\Watch-SentinelXSecurityLog.ps1</code></pre>
+            <p class="privacy-note">Collects Security events 4624/4625 only. Read access to the Security log may require administrator membership. Transport is restricted to loopback; the token is never shown here.</p>
+        </section>
+        <section class="settings-card settings-card-wide">
+            <h3>Active defense · human approval required</h3>
+            <p class="privacy-note">The local dashboard can execute evidence-linked Windows Firewall actions only after you type the exact public IP and explicitly approve it in the confirmation dialog. The SentinelX server must run elevated. A matching rollback removes only the SentinelX-managed rule.</p>
+            <pre><code>flask --app run.py approve-remediation &lt;recommendation-id&gt;
+flask --app run.py remove-remediation &lt;recommendation-id&gt;</code></pre>
+            <p class="privacy-note">Firewall actions change the local host and may disrupt access. Only the exact public IP in a stored recommendation is eligible; no shell is used. Browser actions are loopback-only, and approvals, outcomes, and rollback are recorded in the tamper-evident audit chain.</p>
+        </section>
+    </div>
+    <div class="audit-heading">
+        <div><div class="panel-kicker">TAMPER-EVIDENT RECORDS</div><h3>Audit trail</h3></div>
+        <button id="verify-audit" class="secondary-button" type="button">Verify audit chain</button>
+    </div>
+    <div id="audit-status" class="ingestion-message" role="status" aria-live="polite" hidden></div>
+    <div id="audit-empty" class="table-empty">No audit records are available.</div>
+    <div class="table-wrap" id="audit-table-wrap" hidden>
+        <table>
+            <thead><tr><th>TIME</th><th>ACTION</th><th>ENTITY</th><th>DETAILS</th><th>CHAIN</th></tr></thead>
+            <tbody id="audit-table-body"></tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel rules-panel" id="detection-rules">
+    <div class="panel-heading">
+        <div><div class="panel-kicker">RULE COVERAGE</div><h2>Enabled detection rules</h2></div>
+        <span class="panel-tag">CONFIGURABLE THRESHOLDS</span>
+    </div>
+    <div id="rules-empty" class="table-empty">Detection rules are loading.</div>
+    <div class="table-wrap" id="rules-table-wrap" hidden>
+        <table>
+            <thead><tr><th>RULE</th><th>DESCRIPTION</th><th>SEVERITY</th><th>MITRE ATT&amp;CK</th></tr></thead>
+            <tbody id="rules-table-body"></tbody>
+        </table>
+    </div>
+</section>
+
+<dialog id="advisor-dialog" class="advisor-dialog" aria-labelledby="advisor-title">
+    <div class="advisor-dialog-header">
+        <div><div class="panel-kicker">EVIDENCE-BASED ADVISOR</div><h2 id="advisor-title">AI Solve recommendations</h2></div>
+        <button id="advisor-close" class="dialog-close" type="button" aria-label="Close recommendations">×</button>
+    </div>
+    <p class="advisor-caveat">Recommendations only. No process is terminated and no firewall rule is changed. Disruptive actions require human review.</p>
+    <div id="advisor-content"></div>
+</dialog>
+
+<dialog id="incident-dialog" class="advisor-dialog" aria-labelledby="incident-dialog-title">
+    <div class="advisor-dialog-header">
+        <div><div class="panel-kicker">INCIDENT EVIDENCE TIMELINE</div><h2 id="incident-dialog-title">Incident details</h2></div>
+        <button id="incident-close" class="dialog-close" type="button" aria-label="Close incident details">×</button>
+    </div>
+    <div id="incident-detail-content"></div>
+</dialog>
+
+<dialog id="remediation-confirm-dialog" class="advisor-dialog remediation-confirm-dialog" aria-labelledby="remediation-confirm-title">
+    <div class="advisor-dialog-header">
+        <div><div class="panel-kicker">EXPLICIT HUMAN APPROVAL</div><h2 id="remediation-confirm-title">Confirm firewall action</h2></div>
+        <button id="remediation-confirm-close" class="dialog-close" type="button" aria-label="Cancel firewall action">×</button>
+    </div>
+    <p id="remediation-confirm-warning" class="remediation-warning"></p>
+    <label for="remediation-confirm-ip">Type this exact IP address to continue</label>
+    <code id="remediation-confirm-target" class="remediation-confirm-target"></code>
+    <input id="remediation-confirm-ip" class="remediation-confirm-input" type="text" autocomplete="off" spellcheck="false">
+    <div id="remediation-confirm-error" class="ingestion-message ingestion-message-error" role="alert" hidden></div>
+    <div class="settings-actions">
+        <button id="remediation-confirm-cancel" class="secondary-button" type="button">Cancel</button>
+        <button id="remediation-confirm-submit" class="danger-button" type="button" disabled>Confirm action</button>
+    </div>
+</dialog>
+
+<section class="roadmap-section" id="roadmap">
+    <div class="roadmap-heading"><div><div class="panel-kicker">BUILD ROADMAP</div><h2>Built in deliberate phases</h2></div><span class="roadmap-current"><i></i> Phase 6 · Web orchestration</span></div>
+    <div class="roadmap-grid">
+        <article class="roadmap-card roadmap-card-done"><span class="roadmap-number">01</span><div><strong>Project foundation</strong><p>Flask application, SQLite schema, live overview, and responsive SOC shell.</p></div><span class="roadmap-state">COMPLETE</span></article>
+        <article class="roadmap-card roadmap-card-done"><span class="roadmap-number">02</span><div><strong>Log ingestion</strong><p>Validated JSON and CSV imports with normalized security events.</p></div><span class="roadmap-state">COMPLETE</span></article>
+        <article class="roadmap-card roadmap-card-done"><span class="roadmap-number">03</span><div><strong>Detection engine</strong><p>Explainable rules, evidence-linked alerts, and focused tests.</p></div><span class="roadmap-state">COMPLETE</span></article>
+        <article class="roadmap-card roadmap-card-done"><span class="roadmap-number">04</span><div><strong>Incident management</strong><p>Correlated incidents, lifecycle, evidence timelines, and safe AI Solve advice.</p></div><span class="roadmap-state">COMPLETE</span></article>
+        <article class="roadmap-card roadmap-card-done"><span class="roadmap-number">05</span><div><strong>Live monitoring &amp; active defense</strong><p>Windows logons, IP reputation, locally approved firewall action, and audit verification.</p></div><span class="roadmap-state">COMPLETE</span></article>
+        <article class="roadmap-card roadmap-card-current"><span class="roadmap-number">06</span><div><strong>Web orchestration &amp; bootstrap</strong><p>Local browser approvals, guarded rollback, audit verification, and one-click Windows startup.</p></div><span class="roadmap-state">ACTIVE</span></article>
+        <article class="roadmap-card"><span class="roadmap-number">07+</span><div><strong>Investigate and extend</strong><p>Authentication, richer endpoint monitoring, and controlled later phases.</p></div><span class="roadmap-state">PLANNED</span></article>
+    </div>
+</section>
+{% endblock %}

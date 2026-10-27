@@ -1,0 +1,6 @@
+timestamp,event_type,outcome,username,source_ip,host_name
+2026-01-15T10:00:00Z,linux_ssh_authentication,failure,demo-admin,198.51.100.23,sentinelx-linux-demo
+2026-01-15T10:01:00Z,linux_ssh_authentication,failure,demo-admin,198.51.100.23,sentinelx-linux-demo
+2026-01-15T10:02:00Z,linux_ssh_authentication,failure,demo-admin,198.51.100.23,sentinelx-linux-demo
+2026-01-15T10:03:00Z,linux_ssh_authentication,failure,demo-admin,198.51.100.23,sentinelx-linux-demo
+2026-01-15T10:04:00Z,linux_ssh_authentication,success,demo-admin,198.51.100.23,sentinelx-linux-demo
