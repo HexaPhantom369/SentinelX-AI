@@ -127,6 +127,50 @@ class VirusTotalProvider:
             },
         }
 
+    def lookup_file_hash(self, sha256):
+        request = Request(
+            f"https://www.virustotal.com/api/v3/files/{sha256}",
+            headers={"x-apikey": self.api_key, "Accept": "application/json"},
+        )
+        try:
+            response = self.request_json(request)
+        except ThreatIntelError as error:
+            if "HTTP 404" in str(error):
+                return {
+                    "score": 0,
+                    "summary": {
+                        "status": "not_found",
+                        "malicious_engines": 0,
+                        "suspicious_engines": 0,
+                        "total_engines": 0,
+                    },
+                }
+            raise
+        try:
+            attributes = response["data"]["attributes"]
+            stats = attributes["last_analysis_stats"]
+            counts = [
+                stats[key]
+                for key in ("malicious", "suspicious", "harmless", "undetected", "timeout")
+            ]
+        except (KeyError, TypeError) as error:
+            raise ThreatIntelError("VirusTotal response did not contain file reputation data.") from error
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in counts):
+            raise ThreatIntelError("VirusTotal returned invalid file-analysis statistics.")
+        malicious, suspicious, *_ = counts
+        total = sum(counts)
+        score = round(100 * (malicious + suspicious) / total) if total else 0
+        return {
+            "score": score,
+            "summary": {
+                "status": "analyzed",
+                "malicious_engines": malicious,
+                "suspicious_engines": suspicious,
+                "total_engines": total,
+                "community_reputation": attributes.get("reputation"),
+            },
+        }
+
 
 def create_provider(provider_name, config):
     if provider_name == "mock":

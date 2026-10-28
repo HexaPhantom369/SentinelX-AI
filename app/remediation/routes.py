@@ -1,5 +1,6 @@
 import ipaddress
 import json
+import os
 import sqlite3
 from urllib.parse import urlsplit
 
@@ -12,8 +13,11 @@ from app.remediation.advisor import AdvisoryTargetError
 from app.remediation.executor import (
     RemediationExecutionError,
     approve_firewall_block,
+    approve_process_termination,
     remove_firewall_block,
 )
+from app.remediation.quarantine import quarantine_host_file
+from app.remediation.process_policy import eligible_process
 
 
 remediation_api = Blueprint("remediation_api", __name__)
@@ -51,7 +55,7 @@ def remediation_recommendations():
         "FROM remediation_actions r "
         "LEFT JOIN alerts a ON a.id = r.alert_id "
         "LEFT JOIN incidents i ON i.id = r.incident_id "
-        "WHERE r.action_type = 'block_source_ip' "
+        "WHERE r.action_type IN ('block_source_ip', 'terminate_process') "
         "ORDER BY r.created_at DESC LIMIT 100"
     ).fetchall()
     recommendations = []
@@ -77,7 +81,61 @@ def remediation_recommendations():
         item["subject_type"] = "alert" if item["alert_id"] else "incident"
         item["subject_id"] = item["alert_id"] or item["incident_id"]
         recommendations.append(item)
-    return jsonify(data={"recommendations": recommendations})
+    files = get_db().execute(
+        "SELECT file_hash, original_path, quarantine_path, status, reputation_score, "
+        "observed_at, quarantined_at, error_summary FROM host_file_candidates "
+        "ORDER BY observed_at DESC LIMIT 100"
+    ).fetchall()
+    file_candidates = [
+        {
+            "sha256": row["file_hash"],
+            "file_name": os.path.basename(row["original_path"]),
+            "status": row["status"],
+            "reputation_score": row["reputation_score"],
+            "observed_at": row["observed_at"],
+            "quarantined_at": row["quarantined_at"],
+            "error_summary": row["error_summary"],
+        }
+        for row in files
+    ]
+    recommended_process_events = {
+        item["target"].get("event_id")
+        for item in recommendations
+        if item["action_type"] == "terminate_process"
+    }
+    process_rows = get_db().execute(
+        "SELECT DISTINCT e.id AS event_id, e.process_id, e.process_name, e.observed_at, "
+        "e.indicator_tags_json, a.id AS alert_id, a.title AS alert_title, a.severity "
+        "FROM security_events e JOIN alert_events ae ON ae.event_id = e.id "
+        "JOIN alerts a ON a.id = ae.alert_id "
+        "WHERE e.event_type = 'windows_process_creation_4688' "
+        "AND e.process_id IS NOT NULL AND e.process_name IS NOT NULL "
+        "AND e.indicator_tags_json != '[]' "
+        "AND a.status NOT IN ('Resolved', 'False Positive') "
+        "ORDER BY e.observed_at DESC LIMIT 100"
+    ).fetchall()
+    processes = []
+    for row in process_rows:
+        if row["event_id"] in recommended_process_events:
+            continue
+        pid = eligible_process(row["process_id"], row["process_name"])
+        processes.append(
+            {
+                "event_id": row["event_id"],
+                "process_id": pid or row["process_id"],
+                "process_name": row["process_name"],
+                "observed_at": row["observed_at"],
+                "alert_id": row["alert_id"],
+                "alert_title": row["alert_title"],
+                "severity": row["severity"],
+                "execution_available": pid is not None,
+            }
+        )
+    return jsonify(data={
+        "recommendations": recommendations,
+        "files": file_candidates,
+        "processes": processes,
+    })
 
 
 @remediation_api.post("/api/remediation/run-advisor")
@@ -164,3 +222,88 @@ def approve_remediation(action_id):
 @remediation_api.post("/api/remediation/remove/<action_id>")
 def remove_remediation(action_id):
     return _execute_firewall_action(action_id, "remove")
+
+
+@remediation_api.post("/api/remediation/approve-kill/<action_id>")
+def approve_process_remediation(action_id):
+    rejected = _require_local_ui_intent()
+    if rejected:
+        return rejected
+    payload = request.get_json(silent=True)
+    confirm_pid = payload.get("confirm_pid") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"confirm_pid"}
+        or not isinstance(confirm_pid, str)
+        or not confirm_pid.isdecimal()
+    ):
+        return _error_response("invalid_confirmation", "Type the exact decimal PID to approve process termination.", 400)
+    try:
+        result = approve_process_termination(
+            get_db(), action_id, confirm_pid, True
+        )
+    except RemediationExecutionError as error:
+        connection = get_db()
+        if connection.execute(
+            "SELECT 1 FROM remediation_actions WHERE id = ?", (action_id,)
+        ).fetchone():
+            append_audit_entry(
+                connection,
+                "remediation.process_termination_rejected",
+                "remediation_action",
+                action_id,
+                {"reason": str(error), "human_approval_attempted": True},
+            )
+            connection.commit()
+        status = 404 if "not found" in str(error).casefold() else 409
+        return _error_response("process_action_rejected", str(error), status)
+    except sqlite3.Error:
+        get_db().rollback()
+        current_app.logger.exception("Process termination failed for %s.", action_id)
+        raise
+    return jsonify(data=result), 200
+
+
+@remediation_api.post("/api/remediation/quarantine/<file_hash>")
+def quarantine_file(file_hash):
+    rejected = _require_local_ui_intent()
+    if rejected:
+        return rejected
+    payload = request.get_json(silent=True)
+    confirm_hash = payload.get("confirm_sha256") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"confirm_sha256"}
+        or not isinstance(confirm_hash, str)
+    ):
+        return _error_response("invalid_confirmation", "Type the exact suspicious SHA-256 digest to approve quarantine.", 400)
+    if len(file_hash) != 64 or any(character not in "0123456789abcdefABCDEF" for character in file_hash):
+        return _error_response("invalid_hash", "The file identifier must be a SHA-256 digest.", 400)
+    file_hash = file_hash.lower()
+    try:
+        result = quarantine_host_file(
+            get_db(),
+            file_hash,
+            confirm_hash.lower(),
+            current_app.instance_path,
+        )
+    except RemediationExecutionError as error:
+        connection = get_db()
+        if connection.execute(
+            "SELECT 1 FROM host_file_candidates WHERE file_hash = ?", (file_hash,)
+        ).fetchone():
+            append_audit_entry(
+                connection,
+                "remediation.file_quarantine_rejected",
+                "file_hash",
+                file_hash,
+                {"reason": str(error), "human_approval_attempted": True},
+            )
+            connection.commit()
+        status = 404 if "no suspicious file" in str(error).casefold() else 409
+        return _error_response("file_quarantine_rejected", str(error), status)
+    except sqlite3.Error:
+        get_db().rollback()
+        current_app.logger.exception("File quarantine failed for %s.", file_hash)
+        raise
+    return jsonify(data=result), 200

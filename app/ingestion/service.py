@@ -5,6 +5,7 @@ import io
 import ipaddress
 import json
 from pathlib import PurePath, PureWindowsPath
+import re
 import sqlite3
 import uuid
 
@@ -19,6 +20,20 @@ EVENT_FIELDS = {
     "username": ("username", "user", "account"),
     "source_ip": ("source_ip", "src_ip", "ip_address", "ip"),
     "host_name": ("host_name", "hostname", "host", "computer"),
+    "host_event_record_id": ("host_event_record_id",),
+    "process_id": ("process_id", "pid"),
+    "process_name": ("process_name", "image_name"),
+    "parent_process_name": ("parent_process_name", "parent_image_name"),
+    "destination_port": ("destination_port", "dest_port", "destinationport"),
+    "file_hash": ("file_hash", "sha256", "sha_256"),
+    "indicator_tags": ("indicator_tags", "threat_indicators"),
+}
+ALLOWED_INDICATOR_TAGS = {
+    "encoded_command",
+    "download_cradle",
+    "credential_access_signature",
+    "shadow_copy_deletion",
+    "suspicious_process",
 }
 OUTCOME_VALUES = {
     "success": "success",
@@ -159,6 +174,48 @@ def _normalize_event(record):
         except ValueError as error:
             raise ValueError("source_ip must be a valid IPv4 or IPv6 address.") from error
     host_name = _as_text(_read_alias(record, "host_name"), "host_name", 255)
+    host_event_record_id = _as_text(
+        _read_alias(record, "host_event_record_id"), "host_event_record_id", 64
+    )
+    if host_event_record_id and not re.fullmatch(r"[0-9]{1,20}", host_event_record_id):
+        raise ValueError("host_event_record_id must contain decimal digits only.")
+    process_id = _as_text(_read_alias(record, "process_id"), "process_id", 32)
+    if process_id and not re.fullmatch(r"(?:0[xX][0-9a-fA-F]{1,16}|[0-9]{1,20})", process_id):
+        raise ValueError("process_id must be decimal digits or a hexadecimal Windows identifier.")
+    process_name = _as_text(_read_alias(record, "process_name"), "process_name", 255)
+    if process_name:
+        process_name = PureWindowsPath(process_name).name
+        process_name = PurePath(process_name).name
+    parent_process_name = _as_text(
+        _read_alias(record, "parent_process_name"), "parent_process_name", 255
+    )
+    if parent_process_name:
+        parent_process_name = PureWindowsPath(parent_process_name).name
+        parent_process_name = PurePath(parent_process_name).name
+    raw_port = _read_alias(record, "destination_port")
+    destination_port = None
+    if raw_port not in (None, ""):
+        if isinstance(raw_port, bool) or not str(raw_port).strip().isdigit():
+            raise ValueError("destination_port must be a whole number from 1 to 65535.")
+        destination_port = int(raw_port)
+        if not 1 <= destination_port <= 65535:
+            raise ValueError("destination_port must be a whole number from 1 to 65535.")
+    file_hash = _as_text(_read_alias(record, "file_hash"), "file_hash", 64)
+    if file_hash:
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", file_hash):
+            raise ValueError("file_hash must be a SHA-256 hexadecimal digest.")
+        file_hash = file_hash.lower()
+    raw_tags = _read_alias(record, "indicator_tags")
+    if raw_tags is None:
+        indicator_tags = []
+    elif isinstance(raw_tags, list) and all(isinstance(item, str) for item in raw_tags):
+        indicator_tags = sorted({item.strip().casefold() for item in raw_tags if item.strip()})
+    elif isinstance(raw_tags, str):
+        indicator_tags = sorted({item.strip().casefold() for item in raw_tags.split(",") if item.strip()})
+    else:
+        raise ValueError("indicator_tags must be a list of supported strings.")
+    if len(indicator_tags) > len(ALLOWED_INDICATOR_TAGS) or not set(indicator_tags) <= ALLOWED_INDICATOR_TAGS:
+        raise ValueError("indicator_tags contains an unsupported or excessive indicator.")
 
     normalized = {
         "observed_at": observed_at,
@@ -167,8 +224,25 @@ def _normalize_event(record):
         "username": username,
         "source_ip": source_ip,
         "host_name": host_name,
+        "host_event_record_id": host_event_record_id,
+        "process_id": process_id,
+        "process_name": process_name,
+        "parent_process_name": parent_process_name,
+        "destination_port": destination_port,
+        "file_hash": file_hash,
+        "indicator_tags": indicator_tags,
     }
-    stable_content = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    identity = {
+        key: value
+        for key, value in normalized.items()
+        if key not in {"host_event_record_id", "process_id", "process_name", "parent_process_name", "destination_port", "file_hash", "indicator_tags"}
+    }
+    for key in ("host_event_record_id", "process_id", "process_name", "parent_process_name", "destination_port", "file_hash"):
+        if normalized[key] is not None:
+            identity[key] = normalized[key]
+    if indicator_tags:
+        identity["indicator_tags"] = indicator_tags
+    stable_content = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     normalized["id"] = hashlib.sha256(stable_content.encode("utf-8")).hexdigest()
     return normalized
 
@@ -241,8 +315,10 @@ def ingest_log_file(connection: sqlite3.Connection, filename: str, content: byte
         for event in normalized_events:
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO security_events "
-                "(id, observed_at, event_type, outcome, username, source_ip, host_name, ingestion_job_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(id, observed_at, event_type, outcome, username, source_ip, host_name, "
+                "host_event_record_id, process_id, process_name, parent_process_name, "
+                "destination_port, file_hash, indicator_tags_json, ingestion_job_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     event["id"],
                     event["observed_at"],
@@ -251,6 +327,13 @@ def ingest_log_file(connection: sqlite3.Connection, filename: str, content: byte
                     event["username"],
                     event["source_ip"],
                     event["host_name"],
+                    event["host_event_record_id"],
+                    event["process_id"],
+                    event["process_name"],
+                    event["parent_process_name"],
+                    event["destination_port"],
+                    event["file_hash"],
+                    json.dumps(event["indicator_tags"], separators=(",", ":")),
                     job_id,
                 ),
             )

@@ -9,3 +9,5 @@ instance/*.db
 instance/*.db-shm
 instance/*.db-wal
 instance/*.sqlite
+instance/quarantine/*
+simulate_attack.ps1

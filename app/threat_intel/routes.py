@@ -1,15 +1,20 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hmac
 import ipaddress
 import json
+import re
 import sqlite3
+import uuid
 from urllib.parse import urlsplit
 
 from flask import Blueprint, current_app, jsonify, request
 
 from app.audit import append_audit_entry, verify_audit_chain
+from app.detection import run_detections
 from app.db import get_db
 from app.ingestion.service import ingest_log_file
+from app.remediation.quarantine import validate_candidate_path
+from app.remediation.executor import RemediationExecutionError
 from app.threat_intel.providers import (
     PROVIDER_NAMES,
     ThreatIntelError,
@@ -24,6 +29,9 @@ SUPPORTED_PROVIDERS = {"disabled", *PROVIDER_NAMES}
 AGENT_EVENT_TYPES = {
     "windows_security_logon_4624_success",
     "windows_security_logon_4625_failure",
+    "windows_firewall_blocked_5157",
+    "windows_script_block_4104",
+    "windows_process_creation_4688",
 }
 
 
@@ -172,11 +180,23 @@ def get_settings():
                 "agent_token_configured": token_configured,
                 "endpoint": "/api/host-monitor/windows-events",
                 "transport": "loopback-only HTTP with bearer token",
+                "file_hash_lookups_enabled": bool(
+                    current_app.config.get("ENABLE_FILE_HASH_LOOKUPS")
+                ),
+                "file_hash_provider_configured": bool(
+                    current_app.config.get("VIRUSTOTAL_API_KEY")
+                ),
             },
             "active_defense": {
-                "execution_mode": "local interactive CLI only",
-                "dashboard_execution_available": False,
-                "platform": "Windows Firewall",
+                "execution_mode": "local human-approved dashboard and CLI actions",
+                "dashboard_execution_available": True,
+                "platform": "Windows Firewall, process termination, and file quarantine",
+                "human_approval_required": True,
+            },
+            "ai_triage": {
+                "provider": "Google Gemini",
+                "configured": bool(current_app.config.get("GEMINI_API_KEY")),
+                "external_telemetry_only_on_explicit_ai_solve": True,
             },
         }
     )
@@ -287,10 +307,16 @@ def ingest_windows_security_events():
             not isinstance(record, dict)
             or not isinstance(record.get("event_type"), str)
             or record.get("event_type") not in AGENT_EVENT_TYPES
+            or set(record) - {
+                "timestamp", "observed_at", "event_type", "outcome", "username",
+                "source_ip", "host_name", "host_event_record_id", "process_id",
+                "process_name", "parent_process_name", "destination_port",
+                "file_hash", "indicator_tags",
+            }
             for record in records
         )
     ):
-        return jsonify(error={"code": "invalid_agent_payload", "message": "Provide 1 to 100 supported Windows logon events."}), 400
+        return jsonify(error={"code": "invalid_agent_payload", "message": "Provide 1 to 100 supported Windows security events using approved normalized fields only. Raw command lines and script content are not accepted."}), 400
     content = json.dumps({"events": records}, separators=(",", ":")).encode("utf-8")
     result = ingest_log_file(
         get_db(),
@@ -312,7 +338,179 @@ def ingest_windows_security_events():
         },
     )
     get_db().commit()
+    if result["records_imported"]:
+        result["detection"] = run_detections(get_db())
     return jsonify(data=result), 201 if result["status"] == "completed" else 207 if result["status"] == "partial" else 422
+
+
+@phase5_api.post("/api/host-monitor/file-hash")
+def check_host_file_hash():
+    token = current_app.config.get("AGENT_TOKEN")
+    if not token:
+        return jsonify(error={"code": "agent_not_configured", "message": "Set SENTINELX_AGENT_TOKEN before starting the host monitor."}), 503
+    if not _loopback_request():
+        return jsonify(error={"code": "loopback_required", "message": "The file reputation endpoint accepts loopback connections only."}), 403
+    authorization = request.headers.get("Authorization", "")
+    supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+    if not hmac.compare_digest(supplied, token):
+        return jsonify(error={"code": "invalid_agent_token", "message": "The host monitor bearer token is invalid."}), 401
+    if not current_app.config.get("ENABLE_FILE_HASH_LOOKUPS"):
+        return jsonify(error={"code": "file_hash_lookups_disabled", "message": "Set SENTINELX_ENABLE_FILE_HASH_LOOKUPS=1 to explicitly enable external file-hash lookups."}), 409
+    if not current_app.config.get("VIRUSTOTAL_API_KEY"):
+        return jsonify(error={"code": "provider_not_configured", "message": "Set SENTINELX_VIRUSTOTAL_API_KEY before enabling file reputation checks."}), 409
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) not in ({"sha256"}, {"sha256", "file_path"}):
+        return jsonify(error={"code": "invalid_request", "message": "Provide a SHA-256 digest and, optionally, a local watched-file path; file contents are never accepted."}), 400
+    sha256 = payload.get("sha256")
+    if not isinstance(sha256, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", sha256):
+        return jsonify(error={"code": "invalid_hash", "message": "sha256 must be a 64-character hexadecimal digest."}), 400
+    sha256 = sha256.lower()
+    file_path = payload.get("file_path")
+    candidate_path = None
+    if file_path is not None:
+        try:
+            candidate_path = validate_candidate_path(file_path, sha256)
+        except RemediationExecutionError as error:
+            return jsonify(error={"code": "invalid_file_candidate", "message": str(error)}), 400
+    connection = get_db()
+    now = datetime.now(timezone.utc)
+    cached = connection.execute(
+        "SELECT reputation_score, summary_json, looked_up_at FROM threat_intel_lookups "
+        "WHERE indicator_value = ? AND provider = 'virustotal_file' AND status = 'completed' "
+        "ORDER BY looked_up_at DESC LIMIT 1",
+        (sha256,),
+    ).fetchone()
+    cached_at = None
+    if cached:
+        try:
+            cached_at = datetime.fromisoformat(cached["looked_up_at"].replace("Z", "+00:00"))
+        except ValueError:
+            cached_at = None
+    if cached and cached_at and now - cached_at < timedelta(hours=24):
+        result = {
+            "score": cached["reputation_score"],
+            "summary": json.loads(cached["summary_json"]),
+            "cached": True,
+        }
+        lookup_timestamp = cached["looked_up_at"]
+    else:
+        requests_today = connection.execute(
+            "SELECT COUNT(*) FROM threat_intel_lookups "
+            "WHERE provider = 'virustotal_file' AND looked_up_at >= ?",
+            ((now - timedelta(days=1)).isoformat(),),
+        ).fetchone()[0]
+        if requests_today >= 50:
+            return jsonify(error={"code": "file_lookup_limit", "message": "The local file reputation limit of 50 new hashes per 24 hours has been reached."}), 429
+        try:
+            provider = create_provider("virustotal", current_app.config)
+            result = provider.lookup_file_hash(sha256)
+        except ThreatIntelError as error:
+            connection.execute(
+                "INSERT INTO threat_intel_lookups "
+                "(id, indicator_value, provider, status, summary_json, error_summary, looked_up_at) "
+                "VALUES (?, ?, 'virustotal_file', 'failed', '{}', ?, ?)",
+                (str(uuid.uuid4()), sha256, str(error)[:500], now.isoformat()),
+            )
+            append_audit_entry(
+                connection,
+                "threat_intel.file_hash_lookup_failed",
+                "file_hash",
+                sha256,
+                {"provider": "virustotal_file", "error": str(error)},
+                created_at=now.isoformat(),
+            )
+            connection.commit()
+            return jsonify(error={"code": "file_lookup_failed", "message": str(error)}), 502
+        connection.execute(
+            "INSERT INTO threat_intel_lookups "
+            "(id, indicator_value, provider, status, reputation_score, summary_json, looked_up_at) "
+            "VALUES (?, ?, 'virustotal_file', 'completed', ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                sha256,
+                result["score"],
+                json.dumps(result["summary"], sort_keys=True),
+                now.isoformat(),
+            ),
+        )
+        result["cached"] = False
+        lookup_timestamp = now.isoformat()
+
+    malicious = result["summary"].get("malicious_engines", 0)
+    suspicious = result["summary"].get("suspicious_engines", 0)
+    is_suspicious = (
+        isinstance(malicious, int)
+        and not isinstance(malicious, bool)
+        and isinstance(suspicious, int)
+        and not isinstance(suspicious, bool)
+        and malicious + suspicious >= 5
+    )
+    observed_at = lookup_timestamp
+    event_type = (
+        "windows_file_reputation_suspicious"
+        if is_suspicious
+        else "windows_file_reputation_checked"
+    )
+    ingest_result = ingest_log_file(
+        connection,
+        "windows-file-hash-reputation.json",
+        json.dumps(
+            {
+                "events": [{
+                    "timestamp": observed_at,
+                    "event_type": event_type,
+                    "outcome": "failure" if is_suspicious else "unknown",
+                    "file_hash": sha256,
+                }]
+            },
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        current_app.config["MAX_CONTENT_LENGTH"],
+    )
+    append_audit_entry(
+        connection,
+        "threat_intel.file_hash_suspicious" if is_suspicious else "threat_intel.file_hash_checked",
+        "file_hash",
+        sha256,
+        {
+            "provider": "virustotal_file",
+            "score": result["score"],
+            "malicious_engines": malicious,
+            "suspicious_engines": suspicious,
+            "external_hash_disclosure": not result["cached"],
+        },
+        created_at=observed_at,
+    )
+    if is_suspicious and candidate_path is not None:
+        connection.execute(
+            "INSERT INTO host_file_candidates "
+            "(file_hash, original_path, status, reputation_score, observed_at) "
+            "VALUES (?, ?, 'suspicious', ?, ?) "
+            "ON CONFLICT(file_hash) DO UPDATE SET "
+            "original_path = CASE WHEN host_file_candidates.status = 'quarantined' "
+            "THEN host_file_candidates.original_path ELSE excluded.original_path END, "
+            "status = CASE WHEN host_file_candidates.status = 'quarantined' "
+            "THEN host_file_candidates.status ELSE 'suspicious' END, "
+            "reputation_score = excluded.reputation_score, observed_at = excluded.observed_at",
+            (sha256, str(candidate_path), result["score"], observed_at),
+        )
+    connection.commit()
+    detection = run_detections(connection) if ingest_result["records_imported"] else None
+    return jsonify(
+        data={
+            "sha256": sha256,
+            "provider": "virustotal_file",
+            "cached": result["cached"],
+            "score": result["score"],
+            "summary": result["summary"],
+            "suspicious": is_suspicious,
+            "file_contents_uploaded": False,
+            "local_path_recorded": bool(is_suspicious and candidate_path is not None),
+            "ingestion": ingest_result,
+            "detection": detection,
+        }
+    ), 200
 
 
 @phase5_api.get("/api/audit")

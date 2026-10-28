@@ -6,6 +6,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request
 
+from app.analysis.routes import analysis_api
 from app.config import Config
 from app.db import close_db, init_db_command
 from app.detection.cli import run_detections_command
@@ -38,6 +39,7 @@ def create_app(test_config=None):
     app.register_blueprint(incidents_api)
     app.register_blueprint(phase5_api)
     app.register_blueprint(remediation_api)
+    app.register_blueprint(analysis_api)
     app.cli.add_command(init_db_command)
     app.cli.add_command(ingest_logs_command)
     app.cli.add_command(run_detections_command)

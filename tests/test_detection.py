@@ -86,7 +86,7 @@ class SentinelXDetectionTests(unittest.TestCase):
         self.ingest([self.auth_event(i) for i in range(5)])
         result = self.run_rules()
         alerts = self.alerts()
-        self.assertEqual(result["rules_evaluated"], 6)
+        self.assertEqual(result["rules_evaluated"], 10)
         self.assertEqual([alert["rule_id"] for alert in alerts], ["R001"])
         self.assertEqual(alerts[0]["severity"], "high")
         self.assertIn("not proof of an attack", alerts[0]["explanation"])
@@ -214,7 +214,7 @@ class SentinelXDetectionTests(unittest.TestCase):
             )
             connection.execute("UPDATE detection_rules SET enabled = 0 WHERE rule_id = 'R004'")
         result = self.run_rules()
-        self.assertEqual(result["rules_evaluated"], 5)
+        self.assertEqual(result["rules_evaluated"], 9)
         self.assertEqual([alert["rule_id"] for alert in self.alerts()], ["R001"])
 
     def test_invalid_rule_configuration_returns_explicit_api_error(self):
@@ -264,7 +264,7 @@ class SentinelXDetectionTests(unittest.TestCase):
         response = self.client.get("/api/detections/rules")
         self.assertEqual(response.status_code, 200)
         rules = response.json["data"]["rules"]
-        self.assertEqual(len(rules), 6)
+        self.assertEqual(len(rules), 10)
         repeated_failures = next(rule for rule in rules if rule["rule_id"] == "R001")
         self.assertEqual(json.loads(repeated_failures["config_json"]), {"attempts": 5, "window_minutes": 10})
         self.assertEqual(repeated_failures["mitre_technique_id"], "T1110")
@@ -329,8 +329,8 @@ class SentinelXDetectionTests(unittest.TestCase):
         self.assertIn("fingerprint", alert_columns)
         self.assertEqual(old_rule, ("Existing rule", "Preserve this rule"))
         self.assertEqual(old_alert, ("Existing alert", "Keep evidence", None))
-        self.assertEqual(rule_count, 7)
-        self.assertEqual(version, 5)
+        self.assertEqual(rule_count, 11)
+        self.assertEqual(version, 7)
 
 
 if __name__ == "__main__":

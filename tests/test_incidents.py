@@ -282,7 +282,7 @@ class SentinelXIncidentTests(unittest.TestCase):
         self.assertEqual(statuses, [("legacy-closed", "Resolved"), ("legacy-open", "New")])
         self.assertEqual(links, 1)
         self.assertEqual(foreign_key_errors, [])
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 7)
 
 
 if __name__ == "__main__":

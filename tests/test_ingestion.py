@@ -197,7 +197,7 @@ class SentinelXIngestionTests(unittest.TestCase):
             version = connection.execute("PRAGMA user_version").fetchone()[0]
         self.assertIn("records_duplicate", columns)
         self.assertEqual(row, ("old-job", 0))
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 7)
 
     def test_cli_import_uses_same_ingestion_service(self):
         sample_path = Path(self.temp_dir.name) / "sample.json"

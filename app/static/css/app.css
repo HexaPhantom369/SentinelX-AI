@@ -74,6 +74,13 @@ h1 { margin: 9px 0 5px; font-size: clamp(25px, 3vw, 31px); line-height: 1.2; let
 .notice { margin-bottom: 17px; padding: 12px 14px; border-radius: 7px; font-size: 12px; }
 .notice-error { display: flex; gap: 8px; border: 1px solid #743841; background: #341c24; color: #ffc0c5; }
 .notice-error span { color: #d9a4a9; }
+.threat-warning-banner { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; padding: 13px 15px; border: 1px solid #81414a; border-radius: 7px; background: linear-gradient(110deg, #351e26, #211922); }
+.threat-warning-copy { min-width: 0; display: grid; gap: 4px; }
+.threat-warning-copy > strong { color: #ffb3bb; font-size: 11px; }
+.threat-warning-copy > p { margin: 0; color: #e2bec1; font-size: 10px; }
+.threat-warning-analysis { display: grid; gap: 3px; margin-top: 5px; color: #e2c9ac; font-size: 9px; }
+.threat-warning-analysis small { color: #ae9b91; font-size: 8px; }
+.threat-warning-banner .secondary-button { margin-top: 1px; border-color: #70404a; background: #351e26; color: #ffc0c5; }
 .metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 13px; }
 .metric-card, .panel { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .metric-card { min-width: 0; min-height: 126px; padding: 15px 16px 12px; }
@@ -199,6 +206,13 @@ tbody tr:last-child td { border-bottom: 0; }
 .advisor-caveat { margin: 14px 0; padding: 10px; border: 1px solid #66502c; border-radius: 5px; background: #2d261a; color: #edcb8b; font-size: 10px; }
 .advisor-dialog h3 { margin: 16px 0 6px; color: #cdd9e5; font-size: 11px; }
 .advisor-facts, .advisor-mappings { color: #9aabba; font-size: 10px; }
+.incident-analysis { margin: 14px 0; padding: 11px; border: 1px solid #344962; border-radius: 6px; background: #111d2a; color: #aab9c8; font-size: 10px; }
+.incident-analysis .panel-kicker { margin-bottom: 8px; color: #88b9e8; }
+.incident-analysis p { margin: 6px 0; line-height: 1.55; }
+.incident-analysis .analysis-risk { color: #f0c27a; font-weight: 750; }
+.incident-analysis ul { margin: 5px 0; padding-left: 18px; }
+.incident-analysis li { margin: 4px 0; }
+.incident-analysis small { color: #77899a; font-size: 8px; }
 .advisor-recommendations { display: grid; gap: 8px; }
 .advisor-recommendation { padding: 11px; border: 1px solid #283a4b; border-radius: 6px; background: #0d151e; }
 .advisor-recommendation strong { color: #cbd8e4; font-size: 10px; }
@@ -303,6 +317,7 @@ tbody tr:last-child td { border-bottom: 0; }
     .metric-foot { gap: 8px; }
     .severity-key { font-size: 9px; }
     .roadmap-grid { grid-template-columns: 1fr; }
+    .threat-warning-banner { flex-direction: column; }
     .roadmap-heading { align-items: flex-start; flex-direction: column; }
     .panel { padding-right: 13px; padding-left: 13px; }
     .upload-form { align-items: stretch; flex-direction: column; }

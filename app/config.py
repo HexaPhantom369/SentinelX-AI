@@ -18,4 +18,8 @@ class Config:
     SESSION_COOKIE_SECURE = os.environ.get("SENTINELX_ENV", "development").lower() == "production"
     ABUSEIPDB_API_KEY = os.environ.get("SENTINELX_ABUSEIPDB_API_KEY")
     VIRUSTOTAL_API_KEY = os.environ.get("SENTINELX_VIRUSTOTAL_API_KEY")
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
     AGENT_TOKEN = os.environ.get("SENTINELX_AGENT_TOKEN")
+    ENABLE_FILE_HASH_LOOKUPS = os.environ.get(
+        "SENTINELX_ENABLE_FILE_HASH_LOOKUPS", "0"
+    ).casefold() in {"1", "true", "yes"}

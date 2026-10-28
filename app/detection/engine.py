@@ -96,6 +96,66 @@ RULE_DEFINITIONS = (
             "Review surrounding system and identity events; this detection is not a finding of unauthorized activity.",
         ],
     },
+    {
+        "rule_id": "R007",
+        "name": "Blocked multi-port connection burst",
+        "description": "Detects a short burst of blocked firewall connections to multiple destination ports from one source.",
+        "severity": "high",
+        "mitre_technique_id": "T1046",
+        "mitre_technique_name": "Network Service Discovery",
+        "mitre_rationale": "A concentrated multi-port burst may reflect service discovery or scanning; legitimate monitoring and misconfigured clients can produce similar events.",
+        "thresholds": {"events": 10, "distinct_ports": 5, "window_minutes": 2},
+        "recommended_steps": [
+            "Check the source IP against approved scanners, VPNs, and monitoring systems.",
+            "Review the blocked destination ports and correlate with firewall and endpoint records.",
+            "Do not block shared or trusted infrastructure without an operator's impact review.",
+        ],
+    },
+    {
+        "rule_id": "R008",
+        "name": "Potential shadow-copy destruction command",
+        "description": "Highlights locally classified script or process telemetry matching a shadow-copy deletion indicator.",
+        "severity": "critical",
+        "mitre_technique_id": "T1490",
+        "mitre_technique_name": "Inhibit System Recovery",
+        "mitre_rationale": "A local indicator match for shadow-copy deletion is consistent with recovery-inhibition behavior; verify the process and administrative context before response.",
+        "thresholds": {},
+        "recommended_steps": [
+            "Verify the host, user, process name, and change-management context immediately.",
+            "Preserve endpoint and security logs; coordinate response with the host owner.",
+            "Use authorized endpoint controls only after confirming the process and operational impact.",
+        ],
+    },
+    {
+        "rule_id": "R009",
+        "name": "Suspicious script or process indicator",
+        "description": "Highlights locally classified encoded, download-cradle, or credential-access telemetry.",
+        "severity": "high",
+        "mitre_technique_id": "T1059.001",
+        "mitre_technique_name": "PowerShell",
+        "mitre_rationale": "The local collector observed a high-risk command pattern; legitimate administration tools may use similar behavior and the raw command is intentionally not stored.",
+        "thresholds": {},
+        "recommended_steps": [
+            "Review the process name, parent process, host, user, and event time with the endpoint owner.",
+            "Inspect approved software and change records before classifying the activity.",
+            "Escalate through the organization's authorized endpoint-response process if corroborated.",
+        ],
+    },
+    {
+        "rule_id": "R010",
+        "name": "File hash reported suspicious",
+        "description": "Highlights a newly observed file hash that crossed the configured VirusTotal reputation threshold.",
+        "severity": "high",
+        "mitre_technique_id": "T1204.002",
+        "mitre_technique_name": "Malicious File",
+        "mitre_rationale": "A multi-engine reputation result is an investigative signal, not proof; verify the file and host context before response.",
+        "thresholds": {},
+        "recommended_steps": [
+            "Verify the file hash and owning host with the endpoint operator.",
+            "Review reputation detections and trusted software distribution records.",
+            "Do not delete or quarantine the file automatically; follow the authorized endpoint process.",
+        ],
+    },
 )
 
 AUTHENTICATION_TERMS = {"auth", "authentication", "authenticate", "login", "logon", "ssh", "signin"}
@@ -109,6 +169,7 @@ CONFIG_LIMITS = {
     "events": (2, 10000),
     "distinct_sources": (2, 1000),
     "distinct_accounts": (2, 1000),
+    "distinct_ports": (2, 65535),
     "window_minutes": (1, 1440),
 }
 
@@ -216,6 +277,77 @@ def _make_match(rule, key, anchor_id, events, explanation):
 
 def _run_rule(rule, config, events):
     rule_id = rule["rule_id"]
+    if rule_id == "R007":
+        blocked = [
+            event for event in events
+            if event["event_type"] == "windows_firewall_blocked_5157"
+            and event["source_ip"]
+            and event.get("destination_port")
+        ]
+        matches = _window_matches(
+            blocked,
+            lambda event: event["source_ip"],
+            config["window_minutes"],
+            lambda group: len(group) >= config["events"]
+            and len({event["destination_port"] for event in group}) >= config["distinct_ports"],
+        )
+        return [
+            _make_match(
+                rule,
+                match["key"],
+                match["anchor_id"],
+                match["events"],
+                f"Observed {len(match['events'])} blocked connections from {match['key']} to {len({event['destination_port'] for event in match['events']})} destination ports within {config['window_minutes']} minutes. This may indicate scanning but can also be expected monitoring.",
+            )
+            for match in matches
+        ]
+
+    if rule_id in {"R008", "R009"}:
+        target_tag = "shadow_copy_deletion" if rule_id == "R008" else None
+        other_tags = {
+            "encoded_command",
+            "download_cradle",
+            "credential_access_signature",
+            "suspicious_process",
+        }
+        matches = []
+        for event in events:
+            try:
+                tags = json.loads(event.get("indicator_tags_json") or "[]")
+            except json.JSONDecodeError as error:
+                raise DetectionDataError(
+                    f"Stored event {event['id']} has invalid indicator metadata."
+                ) from error
+            if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+                raise DetectionDataError(
+                    f"Stored event {event['id']} has invalid indicator metadata."
+                )
+            is_match = target_tag in tags if target_tag else not other_tags.isdisjoint(tags)
+            if is_match:
+                matches.append(
+                    _make_match(
+                        rule,
+                        event.get("host_name") or event["id"],
+                        event["id"],
+                        [event],
+                        f"Local host telemetry marked indicator(s) {', '.join(sorted(set(tags) & ({target_tag} if target_tag else other_tags)))} on {event.get('process_name') or event['event_type']}. The command content is not retained; verify this event in the authorized endpoint logs.",
+                    )
+                )
+        return matches
+
+    if rule_id == "R010":
+        return [
+            _make_match(
+                rule,
+                event.get("host_name") or event["id"],
+                event["id"],
+                [event],
+                f"File hash {event.get('file_hash') or 'not recorded'} received a suspicious reputation result. Validate the hash and endpoint context; reputation alone does not confirm malware.",
+            )
+            for event in events
+            if event["event_type"] == "windows_file_reputation_suspicious"
+        ]
+
     if rule_id == "R006":
         matches = []
         for event in events:
@@ -381,7 +513,9 @@ def run_detections(connection: sqlite3.Connection):
     rules = [dict(row) for row in rule_rows]
     configs = {rule["rule_id"]: _validate_config(rule["rule_id"], rule["config_json"]) for rule in rules}
     event_rows = connection.execute(
-        "SELECT id, observed_at, event_type, outcome, username, source_ip, host_name "
+        "SELECT id, observed_at, event_type, outcome, username, source_ip, host_name, "
+        "destination_port, file_hash, process_id, process_name, parent_process_name, "
+        "indicator_tags_json "
         "FROM security_events ORDER BY observed_at, id"
     ).fetchall()
     events = [dict(row) for row in event_rows]

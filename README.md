@@ -1,12 +1,14 @@
 # SentinelX
 
-SentinelX is a defensive security monitoring and investigation platform built in deliberate, testable phases. The current milestones include a Flask/SQLite foundation, validated JSON/CSV ingestion, explainable evidence-linked detections, incident management, optional threat-intelligence lookups, a token-protected Windows Security log collector, and human-approved Windows Firewall response through the local dashboard or CLI.
+SentinelX is a defensive security monitoring and investigation platform built in deliberate, testable phases. It includes validated log ingestion, evidence-linked detections and incidents, optional threat intelligence, Windows telemetry, human-approved Windows Firewall/process/file actions, deterministic local analysis, and optional explicitly invoked Gemini triage.
 
 ## Quickstart
 
 1. `git clone <repository-url> SentinelX-AI`
 2. Right-click `start_sentinelx.bat` and choose **Run as administrator**.
 3. SentinelX opens at <http://127.0.0.1:5000>; keep the console window open while using it.
+
+For a safe synthetic end-to-end demonstration, set the server's `SENTINELX_AGENT_TOKEN` in the current PowerShell session, then run `.\simulate_attack.ps1` in another PowerShell window using the same token. It creates synthetic failed-logon and blocked-port records and a harmless short-lived encoded PowerShell child; it does not attempt real logons or send network traffic.
 
 ## Current architecture
 
@@ -23,8 +25,12 @@ Browser
               ├── Evidence-based incident grouping and lifecycle
               ├── Recommendation-only remediation advisor with audit records
               ├── Pluggable threat-intelligence providers and reputation cache
-              ├── Windows Security 4624/4625 loopback event collector
-              ├── Interactive local Windows Firewall executor (dashboard modal or CLI)
+              ├── Windows Security 4624/4625/5157/4104/4688 loopback event collector
+              ├── Local file hashing and explicitly opt-in VirusTotal hash reputation
+              ├── Local deterministic evidence analysis and high-risk dashboard warnings
+              ├── Optional explicit Gemini triage with sanitized evidence only
+              ├── Human-approved Windows Firewall and process executors
+              ├── Hash-verified local file quarantine with execution denied
               └── Hash-linked audit history with verification
               └── SQLite database in instance/sentinelx.db
 Local operator
@@ -41,21 +47,26 @@ Local operator
 - `app/routes/` separates browser pages from JSON API endpoints.
 - `app/ingestion/service.py` validates the supported event fields, normalizes timestamps/IPs/outcomes, detects duplicate events, and records ingestion history.
 - `app/ingestion/cli.py` exposes the same ingestion service to a local operator.
-- `app/detection/engine.py` implements six deterministic baseline rules, configurable JSON thresholds, justified ATT&CK metadata, idempotent alert creation, and links every alert to its supporting event IDs.
+- `app/detection/engine.py` implements ten deterministic baseline rules, configurable JSON thresholds, justified ATT&CK metadata, idempotent alert creation, and links every alert to its supporting event IDs.
 - `app/detection/cli.py` exposes the detection engine as a Flask CLI command.
 - `app/incidents/service.py` correlates alerts using shared event evidence or matching source/account or host/source context within 30 minutes.
 - `app/incidents/routes.py` provides incident grouping, detail/timeline, lifecycle, and recommendation APIs.
-- `app/remediation/advisor.py` creates deterministic, evidence-based recommendations and audit records. It does not execute operating-system actions or call an external AI model.
-- `app/remediation/executor.py` permits only an exact, public IP linked to a pending evidence-backed recommendation; approval and execution require a local loopback request, same-origin UI intent, exact-IP typing, and an elevated Windows process.
-- `app/remediation/routes.py` provides browser advisor, approve, rollback, and recommendation-list endpoints with the same executor checks and audit logging as the CLI.
+- `app/remediation/advisor.py` creates evidence-linked firewall and suspicious-process recommendations, with explicit human-approval flags.
+- `app/remediation/executor.py` validates exact public-IP approvals and suspicious PID/name/event evidence before invoking fixed Windows commands without a shell. Process termination rechecks the live name and start time, and blocks core Windows and SentinelX server PIDs.
+- `app/remediation/Invoke-SentinelXProcessAction.ps1` contains the fixed, parameter-validated `Stop-Process -Id <PID> -Force` action and refuses protected names or PID reuse.
+- `app/remediation/quarantine.py` accepts only hash-matching monitored files under Downloads/Temp, moves them to an admin/SYSTEM-only quarantine directory as `<sha256>.locked`, denies execute permission, and audits completion or failure.
+- `app/remediation/routes.py` provides local browser advisor, typed-target approval, rollback, quarantine, and recommendation-list endpoints.
 - `app/threat_intel/providers.py` implements mock, AbuseIPDB, and VirusTotal adapters with fixed HTTPS endpoints, bounded requests, validated response shapes, and no redirect following.
-- `app/host_monitor/Watch-SentinelXSecurityLog.ps1` reads only Windows Security Event IDs 4624 and 4625 and posts normalized fields to a loopback-only bearer-token endpoint.
+- `app/threat_intel/routes.py` supports an opt-in VirusTotal endpoint that discloses only file hashes externally, caps new lookups at 50 per 24 hours, and stores a local watched-file path only when its reputation is suspicious.
+- `app/analysis/service.py` creates a deterministic local fallback. `app/analysis/gemini.py` optionally sends sanitized event, user, IP, and process metadata to Gemini only after an operator invokes AI Solve; raw command lines, script bodies, and file contents are never stored or sent.
+- `app/host_monitor/Watch-SentinelXSecurityLog.ps1` reads Windows Security Event IDs 4624, 4625, 5157, 4104, and 4688 and posts selected normalized fields and fixed local indicator tags to a loopback-only bearer-token endpoint. Raw command lines and script blocks are not uploaded.
+- `app/host_monitor/Watch-SentinelXFiles.ps1` hashes recent files in Downloads and temporary folders locally, sends only SHA-256 externally, and provides a local file path to SentinelX only for possible human-approved quarantine.
 - `app/audit.py` appends a SHA-256 hash chain for application audit events and verifies record links and the stored chain head.
 - `app/templates/` and `app/static/` contain the accessible responsive dashboard.
 - `datasets/synthetic/` contains clearly synthetic Windows and Linux authentication examples.
 - `tests/` uses Python's standard-library `unittest`; no test framework dependency is required.
 
-The SQLite schema includes related, constrained tables for users, ingestion jobs, events, rules, alerts, incidents, investigation notes, audit records, remediation recommendations and execution state, threat-intelligence lookups, and model evaluations. Schema version 5 adds IP reputation cache/settings, Windows action state, audit-chain hashes, and backfills existing audit records without removing data.
+The SQLite schema includes related, constrained tables for users, ingestion jobs, events, rules, alerts, incidents, investigation notes, audit records, remediation recommendations and execution state, suspicious local file candidates, threat-intelligence lookups, and model evaluations. Schema version 7 adds the quarantine-candidate table while preserving earlier records and audit history.
 
 ## Windows setup
 
@@ -86,7 +97,7 @@ $env:SENTINELX_SECRET_KEY = (python -c "import secrets; print(secrets.token_hex(
 flask --app run.py init-db
 ```
 
-`init-db` creates missing tables and indexes, upgrades earlier schemas to version 5, and preserves existing records. It does not drop or replace the database. The default database is `instance\sentinelx.db`. To keep it elsewhere, set `SENTINELX_DATABASE` to an absolute path before initializing.
+`init-db` creates missing tables and indexes, upgrades earlier schemas to version 7, and preserves existing records. It does not drop or replace the database. The default database is `instance\sentinelx.db`. To keep it elsewhere, set `SENTINELX_DATABASE` to an absolute path before initializing.
 
 Start the local application:
 
@@ -111,12 +122,17 @@ Open <http://127.0.0.1:5000>. The default server binds to loopback only. The sec
 - `POST /api/alerts/<id>/ai-solve` and `POST /api/incidents/<id>/ai-solve` generate and persist evidence-based recommendations. `GET /api/alerts/<id>/remediation` and `GET /api/incidents/<id>/remediation` list persisted recommendation history.
 - `POST /api/remediation/run-advisor` generates evidence-based advice; `GET /api/remediation` lists firewall recommendations and their execution state.
 - `POST /api/remediation/approve/<action-id>` and `/api/remediation/remove/<action-id>` require `{"confirm_ip":"<exact-target>"}`, loopback, and same-origin UI intent; they execute/rollback only the corresponding SentinelX Windows Firewall rule.
+- `POST /api/remediation/approve-kill/<action-id>` requires `{"confirm_pid":"<exact-decimal-pid>"}` and validates linked suspicious 4688 evidence, exact PID/name, protected-process exclusions, and local administrator status before running the fixed PowerShell script.
+- `POST /api/remediation/quarantine/<sha256>` requires `{"confirm_sha256":"<exact-digest>"}` and rechecks the file under a monitored Downloads/Temp folder before moving and denying execute permission.
+- `GET /api/remediation` lists pending firewall/process recommendations and suspicious local file candidates (only file names, not paths).
 - `GET /api/settings` reports configured integration state without returning secrets.
 - `PUT /api/settings/threat-intel` selects and enables/disables a supported provider. Dashboard mutations require the `X-SentinelX-Request: 1` same-origin intent header.
 - `POST /api/settings/threat-intel/test` performs an explicit provider test lookup of `8.8.8.8`; the dashboard confirms this disclosure first.
 - `POST /api/threat-intel/enrich` looks up source IPs linked to one alert/incident or active alert evidence. Only globally routable addresses are sent; successful results are cached for 24 hours.
 - `GET /api/threat-intel` lists recent lookup results.
-- `POST /api/host-monitor/windows-events` accepts 1–100 approved Windows logon event records only, from loopback with the configured bearer token.
+- `POST /api/host-monitor/windows-events` accepts 1–100 approved Windows security telemetry records, from loopback with the configured bearer token.
+- `POST /api/host-monitor/file-hash` accepts a SHA-256 digest and optional local watched-file path from the loopback bearer-token agent; VirusTotal receives only the hash, file contents are never accepted, and the path is retained only for suspicious results.
+- `POST /api/analysis/<alert|incident>/<id>` returns deterministic local analysis by default. AI Solve may send sanitized telemetry to Gemini with `{"external_ai":true}` only when the operator explicitly invokes the button and `GEMINI_API_KEY` is configured; without a key or on provider failure it returns local analysis.
 - `GET /api/audit` returns recent audit history plus full-chain verification; `GET /api/audit/verify` rechecks every record and `POST` remains available for dashboard compatibility.
 
 Threat-intelligence lookups are disabled by default. Choose `mock`, `abuseipdb`, or `virustotal` in Settings. Real providers require `SENTINELX_ABUSEIPDB_API_KEY` or `SENTINELX_VIRUSTOTAL_API_KEY` to be set in the local environment before enabling. The UI never accepts, stores, or reveals provider keys. External IP lookups are user-initiated and disclose eligible public source IPs to the configured provider; private/reserved IPs are skipped.
@@ -136,7 +152,18 @@ $env:SENTINELX_AGENT_TOKEN = "<same-token>"
 .\app\host_monitor\Watch-SentinelXSecurityLog.ps1
 ```
 
-The script defaults to `http://127.0.0.1:5000`, reads only Windows Security logon events 4624 (success) and 4625 (failure), sends normalized account/IP/host/time fields, and polls with a configurable overlap so repeated events are deduplicated. It does not upload raw XML. Set `SENTINELX_API_BASE` only to an HTTP loopback address. Windows may require granting the operator access to the Security log. The server rejects non-loopback clients and requests without the bearer token; do not bind this development server to an external interface.
+The script defaults to `http://127.0.0.1:5000` and reads Security Event IDs 4624 (successful logon), 4625 (failed logon), 5157 (blocked connection), 4104 (PowerShell script block), and 4688 (process creation). It sends normalized account/IP/host/time/port/process metadata and allow-listed indicator tags. Script and command content are inspected locally to classify a few detection patterns and are never uploaded or stored. The collector polls with an overlap so repeated events are deduplicated; set `SENTINELX_API_BASE` only to an HTTP loopback address. Windows may require granting the operator access to the Security log. The server rejects non-loopback clients and requests without the bearer token; do not bind this development server to an external interface.
+
+The optional file watcher polls Downloads and temporary folders for recent executable/script files, hashes eligible files locally, and sends only the SHA-256 digest. VirusTotal file checks are disabled by default. To enable them, set both environment variables in the SentinelX server process before restarting it:
+
+```powershell
+$env:SENTINELX_ENABLE_FILE_HASH_LOOKUPS = "1"
+$env:SENTINELX_VIRUSTOTAL_API_KEY = "<your local VirusTotal API key>"
+```
+
+In the collector PowerShell process, set the same `SENTINELX_AGENT_TOKEN` used by the server, then run `.\app\host_monitor\Watch-SentinelXFiles.ps1`. The server limits new file-hash lookups to 50 per rolling 24-hour window and caches completed results for 24 hours. VirusTotal receives the hash only; local paths and file contents are not uploaded. The watcher may read/hash files locally, so review the paths and retention policies before enabling it.
+
+High and critical alerts are surfaced in the dashboard warning banner, refreshed every 15 seconds; browser notifications are optional and require granting notification permission. Automatic incident analysis is generated locally and deterministically from linked evidence. The explicitly selected AI Solve action may use Gemini when configured; all analysis and recommendations require human validation.
 
 ## Human-approved Windows Firewall actions
 
@@ -194,7 +221,7 @@ Run the enabled rules against imported events from PowerShell or the Alerts pane
 flask --app run.py run-detections
 ```
 
-With a fresh database and both synthetic files imported, the detection command reports 6 enabled rules evaluated against 11 events and creates 3 sample alerts.
+With a fresh database and both synthetic files imported, the detection command reports 10 enabled rules evaluated against 11 events and creates 3 sample alerts.
 
 The JSON API alternative is:
 
@@ -214,7 +241,11 @@ flask --app run.py group-incidents
 
 The grouping service links alerts only when they share supporting event IDs or matching source/account or host/source context within 30 minutes; time proximity alone is not sufficient. Grouping is repeatable, preserves incident state, and records incident creation in the audit log. Incidents expose a timeline of linked events and alerts and support `New`, `Investigating`, `Contained`, and `Resolved` states. Invalid transitions are rejected and successful state changes are audited.
 
-Use **AI Solve** on an alert or incident to generate a persisted advisory from its linked event evidence. In this phase, “AI Solve” is a deterministic local advisor, not an external AI model. A source-IP firewall block is suggested only for a globally routable observed IP and is clearly marked as requiring human review; this application does not apply firewall changes. Process termination remains unavailable without verified endpoint process identity. No recommendation executes automatically. The advisor records the observed evidence summary, recommendations, ATT&CK mappings, and an audit entry. Do not treat a recommendation as confirmation of malicious activity.
+Use **AI Solve · Gemini triage** on an alert or incident to generate persisted defensive recommendations and request triage. If `GEMINI_API_KEY` is configured, the explicit click discloses up to 30 linked event summaries, including usernames, IPs, process IDs/names, and event times to Google Gemini. Raw command lines and script bodies are not available to the model because SentinelX does not collect or store them; file contents are never sent. Provider failure falls back to local deterministic analysis, with a reason returned to the dashboard. Verify model output; do not treat it as confirmation.
+
+The Active Defense panel can show **Approve Kill** only for linked suspicious process-creation evidence with a valid PID/name. The operator must type the exact decimal PID. Windows PowerShell rechecks that the PID still refers to the same executable and that its start time is consistent with the event; core Windows processes, PIDs 0–4, and the SentinelX server/parent process are rejected. This action is Windows-only, requires an elevated server, and is audited.
+
+The file watcher sends the watched file path only to loopback SentinelX. SentinelX stores it only after a suspicious VirusTotal verdict, and the external VirusTotal provider receives only the SHA-256 digest. **Quarantine File** is enabled only for eligible files in the monitored Downloads/Temp folders; it recomputes the SHA-256, moves the file to the instance quarantine as `<sha256>.locked`, restricts directory access to SYSTEM/Administrators, denies execute permission, and records the result in the audit chain. A failed operation is surfaced; inspect the original and quarantine paths before retrying.
 
 | Rule | Detection behavior | Default threshold | Severity | ATT&CK mapping |
 |---|---|---|---|---|
@@ -224,6 +255,10 @@ Use **AI Solve** on an alert or incident to generate a persisted advisory from i
 | R004 | High authentication-event frequency from one source | 10 events / 5 minutes | Medium | Not mapped |
 | R005 | Failed authentication against multiple accounts from one source | 3 accounts / 10 minutes | High | T1110 · Brute Force |
 | R006 | Event explicitly labeled as privilege escalation | Explicit event type | Medium | T1548 · Abuse Elevation Control Mechanism |
+| R007 | Burst of blocked firewall connections to several destination ports | 10 events, 5 ports / 2 minutes | High | T1046 · Network Service Discovery |
+| R008 | Locally classified shadow-copy deletion indicator | Explicit indicator tag | Critical | T1490 · Inhibit System Recovery |
+| R009 | Locally classified encoded, download-cradle, or credential-access indicator | Explicit indicator tag | High | T1059.001 · PowerShell |
+| R010 | VirusTotal file hash crosses the suspicious reputation threshold | At least 5 combined malicious/suspicious engines | High | T1204.002 · Malicious File |
 
 Rule thresholds are stored as JSON in each `detection_rules.config_json`; these values can be changed in the local SQLite database, and the evaluator validates allowed keys and bounded integer values before processing. `GET /api/detections/rules` exposes current values. Default limits are 1–1440 minutes and 2–10,000 attempts/events or 2–1,000 distinct sources/accounts.
 
@@ -237,7 +272,7 @@ With the virtual environment active:
 python -m unittest discover -s tests -v
 ```
 
-The tests create isolated temporary SQLite databases and cover page rendering, health and dashboard APIs, data-driven counts, status filtering, idempotent initialization and schema upgrades with data preservation, JSON/CSV normalization, malformed and partially invalid files, duplicate ingestion, upload limits, all six detection behaviors, threshold validation, evidence links, alert deduplication, mappings, incident grouping and lifecycle, recommendation persistence and audit history, provider selection/parsing and cache behavior, token-protected event intake, legacy audit-chain migration and tamper detection, and firewall approval/target restrictions using a mocked OS command.
+The tests create isolated temporary SQLite databases and cover page rendering, health and dashboard APIs, data-driven counts, status filtering, idempotent initialization and schema upgrades with data preservation, JSON/CSV normalization, malformed and partially invalid files, duplicate ingestion, upload limits, all ten detection behaviors, host telemetry metadata, local evidence and Gemini triage behavior, gated hash reputation, PID validation and human-approved process execution using mocked Windows calls, hash-verified file quarantine using mocked ACL execution, threshold validation, evidence links, alert deduplication, incident grouping and lifecycle, audit-chain migration and tamper detection, and firewall approval/target restrictions.
 
 ## Security and limitations
 
@@ -246,7 +281,7 @@ The tests create isolated temporary SQLite databases and cover page rendering, h
 - The CLI reads the specified local file and invokes the same validator. Keep sensitive input files outside version control and delete them according to your own retention policy.
 - Reputation providers receive public source IPs only after an operator-triggered lookup. API keys belong in protected local environment configuration; rotate keys if exposed.
 - The Windows agent uses a bearer token over loopback HTTP. Keep the token secret, use a high-entropy value, and do not expose the Flask development server or collector endpoint to a network.
-- Firewall execution is Windows-only and available from the dashboard or CLI only after exact-IP confirmation. The service must run elevated; the CLI independently prompts for typed-IP and explicit approval.
+- Firewall, process termination, and quarantine actions are Windows-only and available only after evidence validation, local operator approval, exact-target typing, and administrator checks; PowerShell/Windows executors use fixed argument lists, not shell interpolation.
 - Dashboard firewall execution is available only through loopback and same-origin UI-intent requests; an exact-IP typed confirmation is required for both block and rollback. Because this local application does not yet have user authentication or roles, do not expose it to other users or networks. Running the bootstrap elevated means the local SentinelX process has administrator privileges.
 - The audit chain detects changes to logged records and checks the stored head, but is not a cryptographic signature or remote immutable log. A privileged local attacker can rewrite the database and chain state.
 - User login and role enforcement are not implemented. Phase 5 state-changing dashboard APIs require a same-origin UI intent header; this is not a replacement for authentication/authorization or comprehensive CSRF hardening.
@@ -262,8 +297,9 @@ The tests create isolated temporary SQLite databases and cover page rendering, h
 4. **Incident management (complete):** deterministic alert grouping, lifecycle tracking, evidence timelines, recommendation-only AI Solve, and audit records.
 5. **Live host monitoring, threat intelligence, and active defense (complete):** Windows logon event collection, pluggable IP reputation, locally approved firewall changes, and verifiable audit chain.
 6. **Web orchestration and bootstrap (complete):** one-click Windows startup, local-browser firewall approval/rollback, and live audit verification.
-7. **Security hardening:** authentication, authorization, comprehensive CSRF protection, retention controls, deployment hardening, and remote audit export.
-7. **Optional anomaly detection:** evaluate and document any model; evidence-based assistance remains usable without external AI.
-8. **Endpoint expansion:** additional transparent read-only monitoring, secure event transport, and carefully policy-gated later actions.
+7. **Host defense detection and analysis (implemented):** additional Windows telemetry, local indicator classification, optional hash-only file reputation, deterministic evidence analysis, and dashboard warnings.
+8. **Human-approved EDR response and optional Gemini triage (implemented):** guarded process termination, monitored-file quarantine, typed-target confirmation, audit-chain events, explicit Gemini disclosure, and safe synthetic demo.
+9. **Security hardening:** authentication, authorization, comprehensive CSRF protection, retention controls, deployment hardening, and remote audit export.
+10. **Optional anomaly detection:** evaluate and document any model; evidence-based assistance remains usable without external AI.
 
 Each phase is intended to add tested functionality without claiming future features are already available.

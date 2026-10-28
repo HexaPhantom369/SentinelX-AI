@@ -1,8 +1,45 @@
 const numberFormatter = new Intl.NumberFormat();
+let knownHighAlertIds = null;
+const analysisInFlight = new Set();
+let latestWarningAlert = null;
 
 function setText(id, value) {
     const element = document.getElementById(id);
     if (element) element.textContent = value;
+}
+
+function renderAiSolveAnalysis(container, analysis) {
+    const section = document.createElement("section");
+    section.className = "incident-analysis";
+    const heading = document.createElement("div");
+    heading.className = "panel-kicker";
+    heading.textContent = analysis.generative_analysis
+        ? `GEMINI TRIAGE · ${analysis.generative_analysis.model}`
+        : "LOCAL DETERMINISTIC TRIAGE";
+    const disclosure = document.createElement("small");
+    disclosure.textContent = analysis.generative_analysis
+        ? "Sanitized event, identity, IP, and process metadata was sent to Google Gemini. Raw CLI/script contents and file contents were not sent. Verify advice before acting."
+        : `${analysis.ai_fallback_reason || "Gemini is not configured; deterministic local analysis is shown."} No telemetry was sent externally.`;
+    const summary = document.createElement("p");
+    const triage = analysis.generative_analysis;
+    summary.textContent = triage ? triage.threat_summary : analysis.plain_language_explanation;
+    const severity = document.createElement("p");
+    severity.className = "analysis-risk";
+    severity.textContent = `Severity: ${(triage ? triage.severity : analysis.risk.severity).toUpperCase()}`;
+    section.append(heading, summary, severity);
+    const mappings = triage ? triage.mitre_attack : analysis.mitre_attack;
+    const map = document.createElement("p");
+    map.textContent = mappings.length
+        ? `MITRE ATT&CK: ${mappings.map((item) => `${item.tactic} · ${item.technique_id} ${item.technique_name}`).join("; ")}`
+        : "MITRE ATT&CK: no mapping returned.";
+    const advice = document.createElement("ul");
+    for (const step of (triage ? triage.mitigation_advice : analysis.recommended_actions)) {
+        const item = document.createElement("li");
+        item.textContent = step;
+        advice.append(item);
+    }
+    section.append(map, advice, disclosure);
+    container.append(section);
 }
 
 function formatDate(value) {
@@ -12,6 +49,7 @@ function formatDate(value) {
 }
 
 function renderAlerts(alerts) {
+    handleHighAlerts(alerts);
     const emptyState = document.getElementById("alerts-empty");
     const tableWrap = document.getElementById("alerts-table-wrap");
     const tableBody = document.getElementById("alerts-table-body");
@@ -68,7 +106,7 @@ function renderAlerts(alerts) {
         solveButton.className = "table-action-button";
         solveButton.dataset.advisorType = "alert";
         solveButton.dataset.advisorId = alert.id;
-        solveButton.textContent = "AI Solve";
+        solveButton.textContent = "AI Solve · Gemini triage";
         const intelButton = document.createElement("button");
         intelButton.type = "button";
         intelButton.className = "table-action-button table-action-button-secondary";
@@ -78,6 +116,92 @@ function renderAlerts(alerts) {
         row.append(title, severity, rule, mapping, status, triggered, action);
         tableBody.append(row);
     }
+}
+
+function handleHighAlerts(alerts) {
+    const highAlerts = alerts.filter((alert) =>
+        ["high", "critical"].includes(alert.severity)
+        && !["Resolved", "False Positive"].includes(alert.status),
+    );
+    const banner = document.getElementById("threat-warning-banner");
+    const summary = document.getElementById("threat-warning-summary");
+    const title = document.getElementById("threat-warning-title");
+    if (!highAlerts.length) {
+        banner.hidden = true;
+        latestWarningAlert = null;
+        knownHighAlertIds = new Set(alerts.map((alert) => alert.id));
+        return;
+    }
+
+    latestWarningAlert = highAlerts[0];
+    title.textContent = `${highAlerts[0].severity.toUpperCase()} security warning${highAlerts.length > 1 ? ` · ${highAlerts.length} active high-risk alert(s)` : ""}`;
+    summary.textContent = `${highAlerts[0].title}: ${highAlerts[0].explanation}`;
+    banner.hidden = false;
+
+    const unseen = knownHighAlertIds === null
+        ? highAlerts.slice(0, 3)
+        : highAlerts.filter((alert) => !knownHighAlertIds.has(alert.id)).slice(0, 3);
+    const firstLoad = knownHighAlertIds === null;
+    knownHighAlertIds = new Set(alerts.map((alert) => alert.id));
+    for (const alert of unseen) {
+        analyzeForWarning(alert);
+        if (!firstLoad && "Notification" in window && Notification.permission === "granted") {
+            new Notification(`${alert.severity.toUpperCase()} SentinelX alert`, {
+                body: `${alert.title}: ${alert.explanation}`,
+                tag: alert.id,
+            });
+        }
+    }
+}
+
+async function analyzeForWarning(alert) {
+    if (analysisInFlight.has(alert.id)) return;
+    analysisInFlight.add(alert.id);
+    try {
+        const response = await fetch(`/api/analysis/alert/${encodeURIComponent(alert.id)}`, {
+            method: "POST",
+            headers: { Accept: "application/json", "X-SentinelX-Request": "1" },
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error?.message || "Local threat analysis failed.");
+        if (latestWarningAlert?.id === alert.id) {
+            renderWarningAnalysis(result.data);
+        }
+    } catch (error) {
+        if (latestWarningAlert?.id === alert.id) {
+            setText("threat-warning-analysis", `Local analysis unavailable: ${error.message}`);
+        }
+    } finally {
+        analysisInFlight.delete(alert.id);
+    }
+}
+
+function renderWarningAnalysis(analysis) {
+    const container = document.getElementById("threat-warning-analysis");
+    container.replaceChildren();
+    const risk = document.createElement("strong");
+    risk.textContent = `Risk ${analysis.risk.severity.toUpperCase()} (${analysis.risk.score}/100)`;
+    const explanation = document.createElement("span");
+    explanation.textContent = analysis.plain_language_explanation;
+    const tactics = document.createElement("small");
+    tactics.textContent = analysis.mitre_attack.length
+        ? `MITRE ATT&CK: ${analysis.mitre_attack.map((item) => `${item.tactic} · ${item.technique_id} ${item.technique_name}`).join("; ")}`
+        : "No ATT&CK mapping on linked alerts.";
+    container.append(risk, explanation, tactics);
+}
+
+async function requestBrowserNotifications() {
+    if (!("Notification" in window)) {
+        setText("threat-warning-analysis", "Browser notifications are not supported here; the in-page warning remains active.");
+        return;
+    }
+    const permission = await Notification.requestPermission();
+    setText(
+        "threat-warning-analysis",
+        permission === "granted"
+            ? "Browser notifications enabled for newly detected high or critical alerts."
+            : "Browser notifications were not enabled; the in-page warning remains active.",
+    );
 }
 
 function renderIncidents(incidents) {
@@ -139,7 +263,7 @@ function renderIncidents(incidents) {
         solveButton.className = "table-action-button";
         solveButton.dataset.advisorType = "incident";
         solveButton.dataset.advisorId = incident.id;
-        solveButton.textContent = "AI Solve";
+        solveButton.textContent = "AI Solve · Gemini triage";
         action.append(detailsButton, solveButton);
         row.append(title, severity, state, counts, updated, action);
         tableBody.append(row);
@@ -239,7 +363,9 @@ function renderRemediations(data) {
         item.status === "recommendation_only"
         && (item.execution_status === "not_requested" || item.execution_status === "executing" || item.execution_status === "executed" || item.execution_status === "failed"),
     );
-    if (!recommendations.length) {
+    const files = data.files || [];
+    const processes = data.processes || [];
+    if (!recommendations.length && !files.length && !processes.length) {
         emptyState.hidden = false;
         return;
     }
@@ -259,8 +385,12 @@ function renderRemediations(data) {
             || recommendation.firewall_removal_status === "failed";
         const actionInProgress = recommendation.execution_status === "executing"
             || recommendation.firewall_removal_status === "removing";
-        status.className = `remediation-state ${isActive ? "remediation-state-active" : actionFailed ? "remediation-state-failed" : "remediation-state-pending"}`;
-        status.textContent = isActive
+        const processCompleted = recommendation.action_type === "terminate_process"
+            && recommendation.execution_status === "executed";
+        status.className = `remediation-state ${isActive || processCompleted ? "remediation-state-active" : actionFailed ? "remediation-state-failed" : "remediation-state-pending"}`;
+        status.textContent = processCompleted
+            ? "Process termination completed"
+            : isActive
             ? "Firewall block active"
             : recommendation.firewall_removal_status === "removed"
                 ? "Firewall block rolled back"
@@ -275,24 +405,41 @@ function renderRemediations(data) {
         const details = document.createElement("p");
         details.className = "remediation-target";
         const sourceIp = recommendation.target.source_ip || "No eligible target";
+        const processTarget = recommendation.target.process_id
+            ? `${recommendation.target.process_name} · PID ${recommendation.target.process_id}`
+            : "";
         const technique = recommendation.mitre_technique_id
             ? `${recommendation.mitre_technique_id}${recommendation.mitre_technique_name ? ` · ${recommendation.mitre_technique_name}` : ""}`
             : "No ATT&CK mapping";
-        details.textContent = `${sourceIp} · ${technique} · ${recommendation.subject_title || recommendation.subject_type}`;
+        details.textContent = recommendation.action_type === "terminate_process"
+            ? `${processTarget || "No eligible process"} · ${technique} · ${recommendation.subject_title || recommendation.subject_type}`
+            : `${sourceIp} · ${technique} · ${recommendation.subject_title || recommendation.subject_type}`;
         const rationale = document.createElement("p");
         rationale.className = "remediation-rationale";
         rationale.textContent = recommendation.rationale;
         const actions = document.createElement("div");
         actions.className = "remediation-actions";
         if (recommendation.execution_status === "not_requested" && recommendation.target.available === true) {
-            const approve = document.createElement("button");
-            approve.type = "button";
-            approve.className = "table-action-button";
-            approve.dataset.remediationOperation = "approve";
-            approve.dataset.remediationId = recommendation.id;
-            approve.dataset.remediationIp = sourceIp;
-            approve.textContent = "Approve Block";
-            actions.append(approve);
+            if (recommendation.action_type === "block_source_ip") {
+                const approve = document.createElement("button");
+                approve.type = "button";
+                approve.className = "table-action-button";
+                approve.dataset.remediationOperation = "approve";
+                approve.dataset.remediationId = recommendation.id;
+                approve.dataset.remediationIp = sourceIp;
+                approve.textContent = "Approve Block";
+                actions.append(approve);
+            } else if (recommendation.action_type === "terminate_process" && recommendation.target.execution_available) {
+                const approve = document.createElement("button");
+                approve.type = "button";
+                approve.className = "danger-button";
+                approve.dataset.remediationOperation = "kill";
+                approve.dataset.remediationId = recommendation.id;
+                approve.dataset.remediationPid = recommendation.target.process_id;
+                approve.dataset.remediationName = recommendation.target.process_name;
+                approve.textContent = "Approve Kill";
+                actions.append(approve);
+            }
         }
         if (isActive) {
             const rollback = document.createElement("button");
@@ -307,6 +454,106 @@ function renderRemediations(data) {
         card.append(heading, details, rationale, actions);
         list.append(card);
     }
+    for (const file of files) {
+        const card = document.createElement("article");
+        card.className = "remediation-card";
+        const heading = document.createElement("div");
+        heading.className = "remediation-card-heading";
+        const title = document.createElement("strong");
+        title.textContent = `File reputation · ${file.file_name}`;
+        const status = document.createElement("span");
+        status.className = `remediation-state ${file.status === "quarantined" ? "remediation-state-active" : file.status === "failed" ? "remediation-state-failed" : "remediation-state-pending"}`;
+        status.textContent = file.status === "quarantined" ? "Quarantined · execution denied" : file.status === "failed" ? "Quarantine failed · inspect audit" : "Suspicious · pending approval";
+        heading.append(title, status);
+        const details = document.createElement("p");
+        details.className = "remediation-target";
+        details.textContent = `SHA-256 ${file.sha256} · VirusTotal score ${file.reputation_score}/100`;
+        const actions = document.createElement("div");
+        actions.className = "remediation-actions";
+        if (file.status === "suspicious") {
+            const quarantine = document.createElement("button");
+            quarantine.type = "button";
+            quarantine.className = "danger-button";
+            quarantine.dataset.remediationOperation = "quarantine";
+            quarantine.dataset.remediationHash = file.sha256;
+            quarantine.dataset.remediationName = file.file_name;
+            quarantine.textContent = "Quarantine File";
+            actions.append(quarantine);
+        }
+        card.append(heading, details);
+        if (file.error_summary) {
+            const error = document.createElement("p");
+            error.className = "remediation-rationale";
+            error.textContent = file.error_summary;
+            card.append(error);
+        }
+        card.append(actions);
+        list.append(card);
+    }
+    for (const process of processes) {
+        const card = document.createElement("article");
+        card.className = "remediation-card";
+        const heading = document.createElement("div");
+        heading.className = "remediation-card-heading";
+        const title = document.createElement("strong");
+        title.textContent = `Suspicious process · ${process.process_name}`;
+        const status = document.createElement("span");
+        status.className = `remediation-state ${process.execution_available ? "remediation-state-pending" : "remediation-state-failed"}`;
+        status.textContent = process.execution_available ? "Pending human review" : "Protected or invalid PID";
+        heading.append(title, status);
+        const detail = document.createElement("p");
+        detail.className = "remediation-target";
+        detail.textContent = `${process.process_name} · PID ${process.process_id} · ${process.severity} alert · ${process.alert_title}`;
+        const actions = document.createElement("div");
+        actions.className = "remediation-actions";
+        if (process.execution_available) {
+            const approve = document.createElement("button");
+            approve.type = "button";
+            approve.className = "danger-button";
+            approve.dataset.incidentProcessKill = process.alert_id;
+            approve.dataset.processSubjectType = "alert";
+            approve.dataset.processSubjectId = process.alert_id;
+            approve.dataset.processEventId = process.event_id;
+            approve.dataset.processId = process.process_id;
+            approve.dataset.processName = process.process_name;
+            approve.textContent = `Approve Kill · PID ${process.process_id}`;
+            actions.append(approve);
+        }
+        card.append(heading, detail, actions);
+        list.append(card);
+    }
+}
+
+function renderThreatAnalysis(container, analysis) {
+    container.replaceChildren();
+    const risk = document.createElement("p");
+    risk.className = "analysis-risk";
+    risk.textContent = `Risk ${analysis.risk.severity.toUpperCase()} · ${analysis.risk.score}/100`;
+    const explanation = document.createElement("p");
+    explanation.textContent = analysis.plain_language_explanation;
+    const evidence = document.createElement("p");
+    evidence.textContent = [
+        `${analysis.evidence.event_count} event(s)`,
+        analysis.evidence.hosts.length ? `Host(s): ${analysis.evidence.hosts.join(", ")}` : "",
+        analysis.evidence.source_ips.length ? `Source IP(s): ${analysis.evidence.source_ips.join(", ")}` : "",
+        analysis.evidence.process_names.length ? `Process(es): ${analysis.evidence.process_names.join(", ")}` : "",
+        analysis.evidence.file_hashes.length ? `SHA-256: ${analysis.evidence.file_hashes.join(", ")}` : "",
+    ].filter(Boolean).join(" · ");
+    const mappings = document.createElement("p");
+    mappings.textContent = analysis.mitre_attack.length
+        ? `MITRE ATT&CK: ${analysis.mitre_attack.map((item) => `${item.tactic} · ${item.technique_id} ${item.technique_name}`).join("; ")}`
+        : "MITRE ATT&CK: no mapping available.";
+    const stepsTitle = document.createElement("strong");
+    stepsTitle.textContent = "Recommended operator review";
+    const steps = document.createElement("ul");
+    for (const action of analysis.recommended_actions) {
+        const item = document.createElement("li");
+        item.textContent = action;
+        steps.append(item);
+    }
+    const note = document.createElement("small");
+    note.textContent = "Local deterministic analysis; no external AI model was called.";
+    container.append(risk, explanation, evidence, mappings, stepsTitle, steps, note);
 }
 
 function renderSettings(data) {
@@ -325,6 +572,18 @@ function renderSettings(data) {
         data.host_monitor.agent_token_configured
             ? "Agent token is configured. The collector endpoint requires loopback and bearer-token validation."
             : "Agent is not configured. Set SENTINELX_AGENT_TOKEN in the SentinelX server environment.",
+    );
+    setText(
+        "file-monitor-status",
+        data.host_monitor.file_hash_lookups_enabled && data.host_monitor.file_hash_provider_configured
+            ? "File hash lookups are explicitly enabled. SHA-256 digests are sent to VirusTotal; file contents and paths are not."
+            : "File hash lookups are disabled until both the server opt-in and VirusTotal API key are configured.",
+    );
+    setText(
+        "gemini-status",
+        data.ai_triage.configured
+            ? "Gemini is configured. Telemetry is sent only after an operator clicks AI Solve."
+            : "Gemini is not configured; AI Solve uses local deterministic analysis.",
     );
 }
 
@@ -795,6 +1054,14 @@ async function runAdvisor(type, id, button) {
             throw new Error(result.error?.message || "Recommendations could not be generated.");
         }
         renderAdvisor(result.data);
+        const analysisResponse = await fetch(`/api/analysis/${encodeURIComponent(type)}/${encodeURIComponent(id)}`, {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/json", "X-SentinelX-Request": "1" },
+            body: JSON.stringify({ external_ai: true }),
+        });
+        const analysisResult = await analysisResponse.json();
+        if (!analysisResponse.ok) throw new Error(analysisResult.error?.message || "Incident triage failed.");
+        renderAiSolveAnalysis(content, analysisResult.data);
         await loadDashboard();
     } catch (error) {
         content.replaceChildren();
@@ -802,6 +1069,51 @@ async function runAdvisor(type, id, button) {
         message.className = "advisor-error";
         message.textContent = error.message;
         content.append(message);
+    } finally {
+        button.disabled = false;
+    }
+}
+
+function canonicalPid(value) {
+    if (typeof value !== "string") return "";
+    if (/^0x[0-9a-f]{1,8}$/i.test(value)) return String(Number.parseInt(value.slice(2), 16));
+    return /^\d{1,10}$/.test(value) ? String(Number.parseInt(value, 10)) : "";
+}
+
+async function prepareIncidentProcessKill(button) {
+    button.disabled = true;
+    try {
+        const subjectType = button.dataset.processSubjectType || "incident";
+        const subjectId = button.dataset.processSubjectId || button.dataset.incidentProcessKill;
+        const response = await fetch("/api/remediation/run-advisor", {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/json", "X-SentinelX-Request": "1" },
+            body: JSON.stringify({
+                subject_type: subjectType,
+                subject_id: subjectId,
+            }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error?.message || "A process recommendation could not be created.");
+        const recommendation = result.data.recommendations.find((item) =>
+            item.action_type === "terminate_process"
+            && item.target.event_id === button.dataset.processEventId
+            && item.target.execution_available === true,
+        );
+        if (!recommendation) {
+            throw new Error("No eligible suspicious process recommendation is linked to this event.");
+        }
+        openRemediationConfirmation({
+            dataset: {
+                remediationOperation: "kill",
+                remediationId: recommendation.recommendation_id,
+                remediationPid: recommendation.target.process_id,
+                remediationName: recommendation.target.process_name,
+            },
+        });
+        await loadDashboard();
+    } catch (error) {
+        showMessage("incident-message", error.message, "error");
     } finally {
         button.disabled = false;
     }
@@ -853,6 +1165,8 @@ async function showIncidentDetails(incidentId, button) {
                     entry.data.username && `Account: ${entry.data.username}`,
                     entry.data.source_ip && `Source: ${entry.data.source_ip}`,
                     entry.data.host_name && `Host: ${entry.data.host_name}`,
+                    entry.data.process_name && `Process: ${entry.data.process_name}`,
+                    entry.data.process_id && `PID: ${entry.data.process_id}`,
                 ].filter(Boolean).join(" · ") || "No additional event fields";
             } else if (entry.type === "alert") {
                 detail.textContent = entry.data.explanation;
@@ -860,6 +1174,24 @@ async function showIncidentDetails(incidentId, button) {
                 detail.textContent = entry.data.body;
             }
             item.append(label, timestamp, detail);
+            if (
+                entry.type === "event"
+                && entry.data.process_id
+                && entry.data.process_name
+                && entry.data.process_action_available
+                && entry.data.event_type === "windows_process_creation_4688"
+            ) {
+                const killButton = document.createElement("button");
+                killButton.type = "button";
+                killButton.className = "danger-button";
+                killButton.dataset.incidentProcessKill = incidentId;
+                killButton.dataset.processEventId = entry.data.id;
+                killButton.dataset.processId = entry.data.process_id;
+                killButton.dataset.processName = entry.data.process_name;
+                const pid = canonicalPid(entry.data.process_id);
+                killButton.textContent = `Approve Kill · PID ${pid || entry.data.process_id}`;
+                item.append(killButton);
+            }
             list.append(item);
         }
         if (!result.data.timeline.length) {
@@ -869,6 +1201,21 @@ async function showIncidentDetails(incidentId, button) {
             list.append(empty);
         }
         content.append(summary, timelineTitle, list);
+        const analysisSection = document.getElementById("incident-analysis");
+        const analysisContent = document.getElementById("incident-analysis-content");
+        analysisSection.hidden = false;
+        analysisContent.textContent = "Analyzing linked evidence locally…";
+        try {
+            const analysisResponse = await fetch(`/api/analysis/incident/${encodeURIComponent(incidentId)}`, {
+                method: "POST",
+                headers: { Accept: "application/json", "X-SentinelX-Request": "1" },
+            });
+            const analysisResult = await analysisResponse.json();
+            if (!analysisResponse.ok) throw new Error(analysisResult.error?.message || "Analysis failed.");
+            renderThreatAnalysis(analysisContent, analysisResult.data);
+        } catch (error) {
+            analysisContent.textContent = `Local evidence analysis unavailable: ${error.message}`;
+        }
     } catch (error) {
         content.replaceChildren();
         const message = document.createElement("p");
@@ -912,23 +1259,44 @@ async function runDetections() {
 function openRemediationConfirmation(button) {
     const dialog = document.getElementById("remediation-confirm-dialog");
     const operation = button.dataset.remediationOperation;
-    const ip = button.dataset.remediationIp;
+    const target = operation === "kill"
+        ? button.dataset.remediationPid
+        : operation === "quarantine"
+            ? button.dataset.remediationHash
+            : button.dataset.remediationIp;
+    const processName = button.dataset.remediationName || "";
     document.getElementById("remediation-confirm-title").textContent =
-        operation === "approve" ? "Approve firewall block" : "Roll back firewall rule";
+        operation === "approve" ? "Approve firewall block"
+            : operation === "remove" ? "Roll back firewall rule"
+                : operation === "kill" ? "Approve process termination"
+                    : "Approve file quarantine";
     document.getElementById("remediation-confirm-warning").textContent =
         operation === "approve"
-            ? `This adds a Windows Firewall inbound block for ${ip}. It may interrupt legitimate connections from this address.`
-            : `This removes the SentinelX-managed Windows Firewall rule for ${ip}.`;
-    setText("remediation-confirm-target", ip);
+            ? `This adds a Windows Firewall inbound block for ${target}. It may interrupt legitimate connections.`
+            : operation === "remove"
+                ? `This removes the SentinelX-managed Windows Firewall rule for ${target}.`
+                : operation === "kill"
+                    ? `This force-terminates ${processName} (PID ${target}) after live PID, name, and start-time verification.`
+                    : `This moves ${button.dataset.remediationName} to the SentinelX quarantine and blocks execution.`;
+    setText("remediation-confirm-target", target);
+    document.getElementById("remediation-confirm-label").textContent =
+        operation === "kill" ? "Type the exact decimal PID to continue"
+            : operation === "quarantine" ? "Type the full SHA-256 digest to continue"
+                : "Type the exact IP address to continue";
     const input = document.getElementById("remediation-confirm-ip");
     input.value = "";
-    input.dataset.actionId = button.dataset.remediationId;
+    input.dataset.actionId = operation === "quarantine"
+        ? button.dataset.remediationHash
+        : button.dataset.remediationId;
     input.dataset.operation = operation;
-    input.dataset.expectedIp = ip;
+    input.dataset.expectedTarget = target;
     input.dataset.requestFailed = "false";
     document.getElementById("remediation-confirm-submit").disabled = true;
     document.getElementById("remediation-confirm-submit").textContent =
-        operation === "approve" ? "Confirm block" : "Confirm rollback";
+        operation === "approve" ? "Confirm block"
+            : operation === "remove" ? "Confirm rollback"
+                : operation === "kill" ? "Confirm kill"
+                    : "Confirm quarantine";
     document.getElementById("remediation-confirm-error").hidden = true;
     dialog.showModal();
     input.focus();
@@ -941,12 +1309,25 @@ async function submitRemediationConfirmation() {
     const operation = input.dataset.operation;
     const dialog = document.getElementById("remediation-confirm-dialog");
     submit.disabled = true;
-    submit.textContent = operation === "approve" ? "Applying block…" : "Rolling back…";
+    submit.textContent = operation === "approve" ? "Applying block…"
+        : operation === "remove" ? "Rolling back…"
+            : operation === "kill" ? "Terminating process…"
+                : "Quarantining file…";
     try {
-        const response = await fetch(`/api/remediation/${operation}/${encodeURIComponent(actionId)}`, {
+        const endpoint = operation === "kill"
+            ? `/api/remediation/approve-kill/${encodeURIComponent(actionId)}`
+            : operation === "quarantine"
+                ? `/api/remediation/quarantine/${encodeURIComponent(actionId)}`
+                : `/api/remediation/${operation}/${encodeURIComponent(actionId)}`;
+        const body = operation === "kill"
+            ? { confirm_pid: input.value }
+            : operation === "quarantine"
+                ? { confirm_sha256: input.value }
+                : { confirm_ip: input.value };
+        const response = await fetch(endpoint, {
             method: "POST",
             headers: { Accept: "application/json", "Content-Type": "application/json", "X-SentinelX-Request": "1" },
-            body: JSON.stringify({ confirm_ip: input.value }),
+            body: JSON.stringify(body),
         });
         const result = await response.json();
         if (!response.ok) {
@@ -957,7 +1338,11 @@ async function submitRemediationConfirmation() {
             "remediation-message",
             operation === "approve"
                 ? `Firewall block added for ${result.data.source_ip}; approval and result were audit-logged.`
-                : `SentinelX firewall rule removed for ${result.data.source_ip}; rollback was audit-logged.`,
+                : operation === "remove"
+                    ? `SentinelX firewall rule removed for ${result.data.source_ip}; rollback was audit-logged.`
+                    : operation === "kill"
+                        ? `Terminated ${result.data.process_name} (PID ${result.data.process_id}); approval and outcome were audit-logged.`
+                        : `Quarantined file as ${result.data.quarantine_name}; execute permission was revoked and the action was audit-logged.`,
             "success",
         );
         await loadDashboard();
@@ -968,8 +1353,11 @@ async function submitRemediationConfirmation() {
         input.dataset.requestFailed = "true";
         await loadDashboard();
     } finally {
-        submit.textContent = operation === "approve" ? "Confirm block" : "Confirm rollback";
-        submit.disabled = input.value !== input.dataset.expectedIp
+        submit.textContent = operation === "approve" ? "Confirm block"
+            : operation === "remove" ? "Confirm rollback"
+                : operation === "kill" ? "Confirm kill"
+                    : "Confirm quarantine";
+        submit.disabled = input.value !== input.dataset.expectedTarget
             || input.dataset.requestFailed === "true";
     }
 }
@@ -987,9 +1375,10 @@ document.getElementById("test-intel-provider").addEventListener("click", testThr
 document.getElementById("enrich-observed-ips").addEventListener("click", () => enrichThreatIntel());
 document.getElementById("verify-audit").addEventListener("click", () => verifyAuditChain("verify-audit"));
 document.getElementById("audit-header-verify").addEventListener("click", () => verifyAuditChain("audit-header-verify"));
+document.getElementById("enable-browser-notifications").addEventListener("click", requestBrowserNotifications);
 document.getElementById("remediation-confirm-ip").addEventListener("input", (event) => {
     document.getElementById("remediation-confirm-submit").disabled =
-        event.target.value !== event.target.dataset.expectedIp
+        event.target.value !== event.target.dataset.expectedTarget
         || event.target.dataset.requestFailed === "true";
 });
 document.getElementById("remediation-confirm-submit").addEventListener("click", submitRemediationConfirmation);
@@ -1012,6 +1401,8 @@ document.addEventListener("click", (event) => {
     if (button) runAdvisor(button.dataset.advisorType, button.dataset.advisorId, button);
     const detailsButton = event.target.closest("[data-incident-details]");
     if (detailsButton) showIncidentDetails(detailsButton.dataset.incidentDetails, detailsButton);
+    const processKillButton = event.target.closest("[data-incident-process-kill]");
+    if (processKillButton) prepareIncidentProcessKill(processKillButton);
     const intelButton = event.target.closest("[data-intel-alert]");
     if (intelButton) enrichThreatIntel("alert", intelButton.dataset.intelAlert, intelButton);
 });
@@ -1019,3 +1410,14 @@ document.addEventListener("change", (event) => {
     if (event.target.matches(".incident-status-select")) updateIncidentStatus(event.target);
 });
 loadDashboard();
+setInterval(async () => {
+    try {
+        const response = await fetch("/api/dashboard", { headers: { Accept: "application/json" } });
+        if (!response.ok) throw new Error("Live alert refresh failed.");
+        const result = await response.json();
+        renderAlerts(result.data.recent_alerts);
+        setText("updated-at", `Updated ${formatDate(result.data.generated_at)}`);
+    } catch {
+        setText("threat-warning-analysis", "Live alert refresh is temporarily unavailable.");
+    }
+}, 15000);

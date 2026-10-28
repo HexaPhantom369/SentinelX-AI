@@ -6,9 +6,9 @@ import sqlite3
 import uuid
 
 from app.audit import append_audit_entry
+from app.remediation.process_policy import eligible_process
 
 logger = logging.getLogger(__name__)
-
 
 class AdvisoryTargetError(ValueError):
     """An alert or incident does not exist or has no evidence to assess."""
@@ -67,23 +67,60 @@ def _recommendations(events, mitre_mappings):
             }
         )
 
-    recommendations.append(
-        {
-            "action_type": "terminate_process",
-            "title": "Process termination requires endpoint evidence",
-            "target": {"process_id": None, "process_name": None},
-            "rationale": (
-                "The linked security events do not contain a process ID, executable path, "
-                "or process inventory. Do not terminate a process based on this alert alone. "
-                "Collect and verify endpoint process evidence first, then require authorized "
-                "human approval before any termination."
-            ),
-            "available": False,
-            "requires_human_approval": True,
-            "execution_available": False,
-            "mitre_mappings": mitre_mappings,
-        }
-    )
+    process_targets = {}
+    for event in events:
+        pid = eligible_process(event.get("process_id"), event.get("process_name"))
+        name = event.get("process_name")
+        try:
+            tags = json.loads(event.get("indicator_tags_json") or "[]")
+        except json.JSONDecodeError as error:
+            raise AdvisoryTargetError("Stored process indicator metadata is invalid.") from error
+        if (
+            pid is None
+            or event.get("event_type") != "windows_process_creation_4688"
+            or not isinstance(tags, list)
+            or not tags
+        ):
+            continue
+        process_targets.setdefault((str(pid), name), event)
+    for (pid, name), event in list(process_targets.items())[:10]:
+        recommendations.append(
+            {
+                "action_type": "terminate_process",
+                "title": f"Review process {name} (PID {pid})",
+                "target": {
+                    "process_id": pid,
+                    "process_name": name,
+                    "event_id": event["id"],
+                    "observed_at": event["observed_at"],
+                },
+                "rationale": (
+                    "This process identity is linked to a locally classified suspicious "
+                    "endpoint event. Verify the live process and business impact; termination "
+                    "requires an elevated Windows service and exact-PID human confirmation."
+                ),
+                "available": True,
+                "requires_human_approval": True,
+                "execution_available": True,
+                "mitre_mappings": mitre_mappings,
+            }
+        )
+    if not process_targets:
+        recommendations.append(
+            {
+                "action_type": "terminate_process",
+                "title": "No eligible suspicious process identity",
+                "target": {"process_id": None, "process_name": None},
+                "rationale": (
+                    "No linked suspicious event includes a valid non-critical PID and process "
+                    "name. Process termination is unavailable without that endpoint evidence."
+                ),
+                "available": False,
+                "requires_human_approval": True,
+                "execution_available": False,
+                "mitre_mappings": mitre_mappings,
+            }
+        )
     if not global_ips:
         recommendations.append(
             {
@@ -115,7 +152,7 @@ def _load_alert(connection, alert_id):
         raise AdvisoryTargetError("Alert was not found.")
     events = connection.execute(
         "SELECT e.id, e.observed_at, e.event_type, e.outcome, e.username, "
-        "e.source_ip, e.host_name "
+        "e.source_ip, e.host_name, e.process_id, e.process_name, e.indicator_tags_json "
         "FROM alert_events ae JOIN security_events e ON e.id = ae.event_id "
         "WHERE ae.alert_id = ? ORDER BY e.observed_at, e.id",
         (alert_id,),
@@ -144,7 +181,7 @@ def _load_incident(connection, incident_id):
     for alert in alerts:
         rows = connection.execute(
             "SELECT e.id, e.observed_at, e.event_type, e.outcome, e.username, "
-            "e.source_ip, e.host_name "
+            "e.source_ip, e.host_name, e.process_id, e.process_name, e.indicator_tags_json "
             "FROM alert_events ae JOIN security_events e ON e.id = ae.event_id "
             "WHERE ae.alert_id = ?",
             (alert["id"],),
@@ -236,6 +273,10 @@ def advise_remediation(connection: sqlite3.Connection, subject_type: str, subjec
         "source_ips": sorted({event["source_ip"] for event in events if event["source_ip"]}),
         "usernames": sorted({event["username"] for event in events if event["username"]}),
         "host_names": sorted({event["host_name"] for event in events if event["host_name"]}),
+        "processes": [
+            {"process_id": event["process_id"], "process_name": event["process_name"]}
+            for event in events if event["process_id"] and event["process_name"]
+        ],
     }
     try:
         run_id = _audit_advisory(

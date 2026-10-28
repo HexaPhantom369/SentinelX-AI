@@ -12,6 +12,15 @@
     <div class="updated-label"><span class="live-dot" aria-hidden="true"></span><span id="updated-at">Loading live data</span></div>
 </section>
 
+<section id="threat-warning-banner" class="threat-warning-banner" role="alert" aria-live="assertive" hidden>
+    <div class="threat-warning-copy">
+        <strong id="threat-warning-title">High-severity security warning</strong>
+        <p id="threat-warning-summary"></p>
+        <div id="threat-warning-analysis" class="threat-warning-analysis"></div>
+    </div>
+    <button id="enable-browser-notifications" class="secondary-button" type="button">Enable browser notifications</button>
+</section>
+
 <div id="dashboard-error" class="notice notice-error" role="alert" hidden>
     <strong>Dashboard data is unavailable.</strong>
     <span id="dashboard-error-message">Check that the local service and database are available, then refresh the page.</span>
@@ -68,7 +77,7 @@
         <div class="status-list">
             <div class="status-row"><span class="status-symbol status-symbol-green">DB</span><span class="status-copy"><strong>Local database</strong><small>SQLite · application instance</small></span><span class="status-value status-value-good" id="database-status">Checking</span></div>
             <div class="status-row"><span class="status-symbol status-symbol-blue">IN</span><span class="status-copy"><strong>Log ingestion</strong><small id="ingestion-detail">JSON and CSV imports</small></span><span class="status-value" id="ingestion-status">Ready</span></div>
-            <div class="status-row"><span class="status-symbol status-symbol-violet">AI</span><span class="status-copy"><strong>AI analysis</strong><small>Optional evidence summaries · later phase</small></span><span class="status-value" id="ai-status">Not configured</span></div>
+            <div class="status-row"><span class="status-symbol status-symbol-violet">AN</span><span class="status-copy"><strong>Local evidence analysis</strong><small>Deterministic summaries · no external model</small></span><span class="status-value" id="ai-status">Ready</span></div>
         </div>
     </article>
 </section>
@@ -130,9 +139,9 @@
 <section class="panel remediation-panel" id="active-defense">
     <div class="panel-heading">
         <div><div class="panel-kicker">HUMAN-APPROVED RESPONSE</div><h2>Active defense</h2></div>
-        <span class="panel-tag">WINDOWS FIREWALL · LOCAL ONLY</span>
+        <span class="panel-tag">LOCAL WINDOWS RESPONSE · HUMAN APPROVAL</span>
     </div>
-    <p class="incidents-description">Recommendations are evidence-linked. Firewall changes run only after you type the exact public IP and explicitly approve the action. Review trusted VPNs, proxies, and shared networks before blocking.</p>
+    <p class="incidents-description">Recommendations are linked to endpoint evidence. Firewall changes, process termination, and file quarantine require explicit human approval, exact target confirmation, local loopback access, and an elevated Windows process.</p>
     <div id="remediation-message" class="ingestion-message" role="status" aria-live="polite" hidden></div>
     <div id="remediation-empty" class="table-empty">Generate an evidence-based recommendation from an alert or incident to see it here.</div>
     <div id="remediation-list" class="remediation-list"></div>
@@ -164,7 +173,7 @@
     <div id="intel-empty" class="table-empty">No reputation lookups recorded.</div>
     <div class="table-wrap" id="intel-table-wrap" hidden>
         <table>
-            <thead><tr><th>IP ADDRESS</th><th>PROVIDER</th><th>REPUTATION</th><th>DETAILS</th><th>LOOKED UP</th></tr></thead>
+            <thead><tr><th>INDICATOR</th><th>PROVIDER</th><th>REPUTATION</th><th>DETAILS</th><th>LOOKED UP</th></tr></thead>
             <tbody id="intel-table-body"></tbody>
         </table>
     </div>
@@ -201,11 +210,18 @@
             <p class="privacy-note">Set <code>SENTINELX_AGENT_TOKEN</code> in the server environment and restart SentinelX. On the monitored Windows host, set the same value in the current PowerShell session, then run:</p>
             <pre><code>$env:SENTINELX_AGENT_TOKEN = "your-local-agent-token"
 .\app\host_monitor\Watch-SentinelXSecurityLog.ps1</code></pre>
-            <p class="privacy-note">Collects Security events 4624/4625 only. Read access to the Security log may require administrator membership. Transport is restricted to loopback; the token is never shown here.</p>
+            <p class="privacy-note">Collects Security events 4624/4625/5157/4104/4688. Raw script bodies and command lines are inspected locally for fixed indicators but never sent or stored; only allow-listed tags and process metadata are sent. Transport is restricted to loopback; the token is never shown here.</p>
+            <p id="file-monitor-status" class="privacy-note">Loading optional file-hash lookup status…</p>
+            <h3>Optional file hash watcher</h3>
+            <p class="privacy-note">Set <code>SENTINELX_ENABLE_FILE_HASH_LOOKUPS=1</code> and configure <code>SENTINELX_VIRUSTOTAL_API_KEY</code> before starting the server. Then run <code>.\app\host_monitor\Watch-SentinelXFiles.ps1</code> on the monitored host. VirusTotal receives only SHA-256 hashes, subject to a 50 new-hash daily limit and 24-hour cache. A local path is sent only to loopback SentinelX and stored for human-approved quarantine when the reputation result is suspicious. This is disabled unless explicitly opted in.</p>
+            <h3>Optional Gemini triage</h3>
+            <p id="gemini-status" class="privacy-note">Loading Gemini configuration…</p>
+            <p class="privacy-note">Set <code>GEMINI_API_KEY</code> in the server environment and restart SentinelX. Only an explicit click on an AI Solve button submits sanitized event, user, IP, and process metadata to Google Gemini. Raw command lines, script bodies, and file contents are never stored or sent. Without a key, AI Solve uses deterministic local triage.</p>
         </section>
         <section class="settings-card settings-card-wide">
             <h3>Active defense · human approval required</h3>
-            <p class="privacy-note">The local dashboard can execute evidence-linked Windows Firewall actions only after you type the exact public IP and explicitly approve it in the confirmation dialog. The SentinelX server must run elevated. A matching rollback removes only the SentinelX-managed rule.</p>
+            <p class="privacy-note">Process termination is offered only for a suspicious 4688 process event with a linked PID/name; the live process name and start time are revalidated before the fixed PowerShell script executes. Core Windows processes and low PIDs are blocked. File quarantine is limited to watched Downloads/Temp locations, rechecks the SHA-256, moves the file to <code>instance\quarantine\&lt;sha256&gt;.locked</code>, and revokes execute permission. Type the exact PID or hash to approve. The server must run elevated.</p>
+            <p class="privacy-note">Clicking AI Solve sends sanitized event, user, IP, and process metadata to Google Gemini only when <code>GEMINI_API_KEY</code> is configured. Raw command lines, script bodies, and file contents are never stored or sent. Without a key, analysis falls back to local deterministic results.</p>
             <pre><code>flask --app run.py approve-remediation &lt;recommendation-id&gt;
 flask --app run.py remove-remediation &lt;recommendation-id&gt;</code></pre>
             <p class="privacy-note">Firewall actions change the local host and may disrupt access. Only the exact public IP in a stored recommendation is eligible; no shell is used. Browser actions are loopback-only, and approvals, outcomes, and rollback are recorded in the tamper-evident audit chain.</p>
@@ -244,7 +260,7 @@ flask --app run.py remove-remediation &lt;recommendation-id&gt;</code></pre>
         <div><div class="panel-kicker">EVIDENCE-BASED ADVISOR</div><h2 id="advisor-title">AI Solve recommendations</h2></div>
         <button id="advisor-close" class="dialog-close" type="button" aria-label="Close recommendations">×</button>
     </div>
-    <p class="advisor-caveat">Recommendations only. No process is terminated and no firewall rule is changed. Disruptive actions require human review.</p>
+    <p class="advisor-caveat">AI Solve may disclose sanitized telemetry to Google Gemini when configured. Verify its output. No host action runs without separate explicit approval and typed-target confirmation.</p>
     <div id="advisor-content"></div>
 </dialog>
 
@@ -253,16 +269,20 @@ flask --app run.py remove-remediation &lt;recommendation-id&gt;</code></pre>
         <div><div class="panel-kicker">INCIDENT EVIDENCE TIMELINE</div><h2 id="incident-dialog-title">Incident details</h2></div>
         <button id="incident-close" class="dialog-close" type="button" aria-label="Close incident details">×</button>
     </div>
+    <section id="incident-analysis" class="incident-analysis" hidden>
+        <div class="panel-kicker">LOCAL EVIDENCE ANALYSIS</div>
+        <div id="incident-analysis-content"></div>
+    </section>
     <div id="incident-detail-content"></div>
 </dialog>
 
 <dialog id="remediation-confirm-dialog" class="advisor-dialog remediation-confirm-dialog" aria-labelledby="remediation-confirm-title">
     <div class="advisor-dialog-header">
-        <div><div class="panel-kicker">EXPLICIT HUMAN APPROVAL</div><h2 id="remediation-confirm-title">Confirm firewall action</h2></div>
+        <div><div class="panel-kicker">EXPLICIT HUMAN APPROVAL</div><h2 id="remediation-confirm-title">Confirm response action</h2></div>
         <button id="remediation-confirm-close" class="dialog-close" type="button" aria-label="Cancel firewall action">×</button>
     </div>
     <p id="remediation-confirm-warning" class="remediation-warning"></p>
-    <label for="remediation-confirm-ip">Type this exact IP address to continue</label>
+    <label id="remediation-confirm-label" for="remediation-confirm-ip">Type the exact target to continue</label>
     <code id="remediation-confirm-target" class="remediation-confirm-target"></code>
     <input id="remediation-confirm-ip" class="remediation-confirm-input" type="text" autocomplete="off" spellcheck="false">
     <div id="remediation-confirm-error" class="ingestion-message ingestion-message-error" role="alert" hidden></div>

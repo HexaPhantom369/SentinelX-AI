@@ -452,7 +452,7 @@ class SentinelXPhaseFiveTests(unittest.TestCase):
             ).fetchone()
             foreign_key_errors = get_db().execute("PRAGMA foreign_key_check").fetchall()
         self.assertTrue(result["valid"])
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 7)
         self.assertEqual(tuple(action), ("not_requested", "not_requested"))
         self.assertEqual(foreign_key_errors, [])
 

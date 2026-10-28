@@ -35,6 +35,13 @@ CREATE TABLE IF NOT EXISTS security_events (
     username TEXT,
     source_ip TEXT,
     host_name TEXT,
+    host_event_record_id TEXT,
+    process_id TEXT,
+    process_name TEXT,
+    parent_process_name TEXT,
+    destination_port INTEGER CHECK (destination_port IS NULL OR destination_port BETWEEN 1 AND 65535),
+    file_hash TEXT,
+    indicator_tags_json TEXT NOT NULL DEFAULT '[]',
     ingestion_job_id TEXT REFERENCES ingestion_jobs(id) ON DELETE SET NULL,
     ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -155,6 +162,18 @@ CREATE TABLE IF NOT EXISTS remediation_actions (
            (alert_id IS NULL AND incident_id IS NOT NULL))
 );
 
+CREATE TABLE IF NOT EXISTS host_file_candidates (
+    file_hash TEXT PRIMARY KEY CHECK (length(file_hash) = 64),
+    original_path TEXT NOT NULL,
+    quarantine_path TEXT,
+    status TEXT NOT NULL DEFAULT 'suspicious'
+        CHECK (status IN ('suspicious', 'quarantined', 'failed')),
+    reputation_score INTEGER NOT NULL CHECK (reputation_score BETWEEN 0 AND 100),
+    observed_at TEXT NOT NULL,
+    quarantined_at TEXT,
+    error_summary TEXT
+);
+
 CREATE TABLE IF NOT EXISTS threat_intel_lookups (
     id TEXT PRIMARY KEY,
     indicator_value TEXT NOT NULL,
@@ -271,6 +290,25 @@ def init_db():
             connection.execute(
                 f"ALTER TABLE remediation_actions ADD COLUMN {column} {definition}"
             )
+    event_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(security_events)")
+    }
+    for column, definition in (
+        ("host_event_record_id", "TEXT"),
+        ("process_id", "TEXT"),
+        ("process_name", "TEXT"),
+        ("parent_process_name", "TEXT"),
+        (
+            "destination_port",
+            "INTEGER CHECK (destination_port IS NULL OR destination_port BETWEEN 1 AND 65535)",
+        ),
+        ("file_hash", "TEXT"),
+        ("indicator_tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ):
+        if column not in event_columns:
+            connection.execute(
+                f"ALTER TABLE security_events ADD COLUMN {column} {definition}"
+            )
     incident_columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(incidents)")
     }
@@ -320,7 +358,7 @@ def init_db():
 
     backfill_audit_chain(connection)
     connection.execute("CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status)")
-    connection.execute("PRAGMA user_version = 5")
+    connection.execute("PRAGMA user_version = 7")
     connection.commit()
 
 
@@ -328,4 +366,4 @@ def init_db():
 def init_db_command():
     """Create or upgrade SentinelX tables and load built-in rules without dropping data."""
     init_db()
-    click.echo("Initialized SentinelX database (schema version 5).")
+    click.echo("Initialized SentinelX database (schema version 7).")

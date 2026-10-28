@@ -32,7 +32,8 @@ class SentinelXAppTests(unittest.TestCase):
         self.assertIn(b"No security events yet", response.data)
         self.assertIn(b'id="incidents-view"', response.data)
         self.assertIn(b'id="advisor-dialog"', response.data)
-        self.assertIn(b"No process is terminated", response.data)
+        self.assertIn(b"Google Gemini", response.data)
+        self.assertIn(b"human-approved quarantine", response.data)
 
     def test_health_endpoint_reports_database_connection(self):
         response = self.client.get("/api/health")
@@ -51,7 +52,7 @@ class SentinelXAppTests(unittest.TestCase):
                 "critical_alerts": 0,
                 "high_alerts": 0,
                 "open_incidents": 0,
-                "enabled_rules": 6,
+                "enabled_rules": 10,
             },
         )
         self.assertEqual(response.json["data"]["ingestion"]["status"], "not_configured")
@@ -89,7 +90,7 @@ class SentinelXAppTests(unittest.TestCase):
                 "critical_alerts": 1,
                 "high_alerts": 0,
                 "open_incidents": 1,
-                "enabled_rules": 6,
+                "enabled_rules": 10,
             },
         )
         self.assertEqual(len(response.json["data"]["recent_alerts"]), 2)
@@ -112,8 +113,8 @@ class SentinelXAppTests(unittest.TestCase):
             rules = connection.execute("SELECT COUNT(*) FROM detection_rules").fetchone()[0]
             connection.close()
         self.assertEqual(users, 1)
-        self.assertEqual(schema_version, 5)
-        self.assertEqual(rules, 6)
+        self.assertEqual(schema_version, 7)
+        self.assertEqual(rules, 10)
 
     def test_api_not_found_uses_json_error_response(self):
         response = self.client.get("/api/not-a-route")

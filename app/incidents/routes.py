@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 import sqlite3
 
 from app.audit import append_audit_entry
@@ -9,6 +10,7 @@ from app.db import get_db
 from app.incidents.service import group_alerts_into_incidents
 from app.remediation import advise_remediation
 from app.remediation.advisor import AdvisoryTargetError
+from app.remediation.process_policy import eligible_process
 
 
 incidents_api = Blueprint("incidents_api", __name__)
@@ -81,22 +83,37 @@ def incident_detail(incident_id):
     ).fetchall()
     event_rows = connection.execute(
         "SELECT DISTINCT e.id, e.observed_at, e.event_type, e.outcome, e.username, "
-        "e.source_ip, e.host_name "
+        "e.source_ip, e.host_name, e.process_id, e.process_name, "
+        "e.parent_process_name, e.file_hash, e.indicator_tags_json "
         "FROM incident_alerts ia "
         "JOIN alert_events ae ON ae.alert_id = ia.alert_id "
         "JOIN security_events e ON e.id = ae.event_id "
         "WHERE ia.incident_id = ? ORDER BY e.observed_at, e.id",
         (incident_id,),
     ).fetchall()
-    timeline = [
-        {
-            "timestamp": event["observed_at"],
-            "type": "event",
-            "classification": "observed_fact",
-            "data": dict(event),
-        }
-        for event in event_rows
-    ]
+    timeline = []
+    for event in event_rows:
+        event_data = dict(event)
+        if (
+            event_data["event_type"] == "windows_process_creation_4688"
+            and eligible_process(event_data["process_id"], event_data["process_name"])
+        ):
+            try:
+                tags = json.loads(event_data.pop("indicator_tags_json") or "[]")
+            except json.JSONDecodeError:
+                tags = []
+            event_data["process_action_available"] = isinstance(tags, list) and bool(tags)
+        else:
+            event_data.pop("indicator_tags_json", None)
+            event_data["process_action_available"] = False
+        timeline.append(
+            {
+                "timestamp": event["observed_at"],
+                "type": "event",
+                "classification": "observed_fact",
+                "data": event_data,
+            }
+        )
     timeline.extend(
         {
             "timestamp": alert["triggered_at"],

@@ -5,13 +5,18 @@ import json
 import os
 import platform
 import subprocess
+from pathlib import Path
 
 from app.audit import append_audit_entry
+from app.remediation.process_policy import (
+    PROTECTED_PROCESS_NAMES,
+    canonical_process_id,
+    eligible_process,
+)
 
 
 class RemediationExecutionError(ValueError):
     """A local firewall action could not be safely approved or completed."""
-
 
 def _validate_target(connection, action, typed_ip, approved, admin_check):
     if not approved:
@@ -281,3 +286,175 @@ def remove_firewall_block(
         connection, action_for_validation, typed_ip, approved, admin_check
     )
     return _execute(connection, action, "delete", rule_name, source_ip, runner)
+
+
+def approve_process_termination(
+    connection,
+    action_id,
+    typed_pid,
+    approved,
+    *,
+    runner=None,
+    admin_check=None,
+):
+    runner = runner or subprocess.run
+    admin_check = admin_check or _windows_admin
+    if not approved:
+        raise RemediationExecutionError("Human approval was not provided; no process command was run.")
+    action = connection.execute(
+        "SELECT id, alert_id, incident_id, action_type, status, target_json, "
+        "requires_human_approval, execution_status, execution_details "
+        "FROM remediation_actions WHERE id = ?",
+        (action_id,),
+    ).fetchone()
+    if action is None:
+        raise RemediationExecutionError("Remediation recommendation was not found.")
+    if (
+        action["action_type"] != "terminate_process"
+        or action["status"] != "recommendation_only"
+        or not action["requires_human_approval"]
+        or action["execution_status"] != "not_requested"
+    ):
+        raise RemediationExecutionError("Only a pending, human-approved process recommendation can be executed.")
+    try:
+        target = json.loads(action["target_json"])
+        pid_text = target["process_id"]
+        pid = int(pid_text, 10)
+        process_name = target["process_name"]
+        event_id = target["event_id"]
+        observed_at = target["observed_at"]
+        observed_time = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RemediationExecutionError("The recommendation has invalid process evidence.") from error
+    if not isinstance(process_name, str):
+        raise RemediationExecutionError("The recommendation has an invalid process name.")
+    process_base_name = Path(process_name).stem
+    if (
+        eligible_process(pid_text, process_name) is None
+        or pid in {os.getpid(), os.getppid()}
+        or str(pid) != pid_text
+        or process_base_name.casefold() in PROTECTED_PROCESS_NAMES
+        or typed_pid != pid_text
+    ):
+        raise RemediationExecutionError("The process target is protected, invalid, or does not exactly match the typed PID.")
+    if not isinstance(event_id, str) or not event_id:
+        raise RemediationExecutionError("The recommendation has no linked process event.")
+    event = connection.execute(
+        "SELECT e.id, e.process_id, e.process_name, e.event_type, e.observed_at, "
+        "e.indicator_tags_json FROM security_events e "
+        "WHERE e.id = ? AND e.event_type = 'windows_process_creation_4688' "
+        "AND EXISTS ("
+        "SELECT 1 FROM alert_events ae LEFT JOIN incident_alerts ia ON ia.alert_id = ae.alert_id "
+        "WHERE ae.event_id = e.id AND ((? IS NOT NULL AND ae.alert_id = ?) "
+        "OR (? IS NOT NULL AND ia.incident_id = ?)))",
+        (event_id, action["alert_id"], action["alert_id"], action["incident_id"], action["incident_id"]),
+    ).fetchone()
+    if (
+        event is None
+        or canonical_process_id(event["process_id"]) != pid_text
+        or event["process_name"] != process_name
+        or event["observed_at"] != observed_at
+    ):
+        raise RemediationExecutionError("The process identity is no longer linked to this alert or incident.")
+    try:
+        tags = json.loads(event["indicator_tags_json"] or "[]")
+    except json.JSONDecodeError as error:
+        raise RemediationExecutionError("The process indicator evidence is invalid.") from error
+    if not isinstance(tags, list) or not tags:
+        raise RemediationExecutionError("The process has no suspicious indicator evidence.")
+    if platform.system() != "Windows":
+        raise RemediationExecutionError("Process termination is supported only on Windows.")
+    if not admin_check():
+        raise RemediationExecutionError("Run SentinelX in an elevated administrator session.")
+
+    system_root = os.environ.get("SystemRoot")
+    if not system_root:
+        raise RemediationExecutionError("Windows system directory is unavailable; no process command was run.")
+    powershell = os.path.join(
+        system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+    )
+    script = Path(__file__).with_name("Invoke-SentinelXProcessAction.ps1")
+    if not os.path.isfile(powershell) or not script.is_file():
+        raise RemediationExecutionError("The trusted PowerShell process-action files are unavailable.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    approval = {
+        "process_id": pid,
+        "process_name": process_name,
+        "event_id": event_id,
+        "human_approved": True,
+        "approver": os.environ.get("USERNAME") or "local-operator",
+    }
+    history = _execution_history(action, {"operation": "terminate_process", **approval})
+    cursor = connection.execute(
+        "UPDATE remediation_actions SET execution_status = 'executing', execution_at = ?, "
+        "execution_details = ? WHERE id = ? AND execution_status = 'not_requested'",
+        (now, history, action_id),
+    )
+    if cursor.rowcount != 1:
+        connection.rollback()
+        raise RemediationExecutionError("The remediation state changed; inspect it before trying again.")
+    append_audit_entry(
+        connection,
+        "remediation.process_termination_approved",
+        "remediation_action",
+        action_id,
+        approval,
+        created_at=now,
+    )
+    connection.commit()
+    command = [
+        powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(script), "-ProcessId", str(pid),
+        "-ExpectedName", process_name, "-ObservedAt", observed_time.isoformat(),
+    ]
+    try:
+        result = runner(command, capture_output=True, text=True, timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        failure = "PowerShell process termination failed or timed out; inspect the live process."
+        output = ""
+        return_code = -1
+        cause = error
+    else:
+        return_code = result.returncode
+        output = (result.stdout or result.stderr or "")[:1000]
+        failure = "PowerShell rejected the process action; no successful termination was confirmed."
+        cause = None
+
+    succeeded = return_code == 0
+    details = {
+        "operation": "terminate_process",
+        **approval,
+        "return_code": return_code,
+        "output": output,
+    }
+    if not succeeded:
+        details["error"] = failure
+    history = _execution_history(
+        {**dict(action), "execution_details": history},
+        details,
+    )
+    connection.execute(
+        "UPDATE remediation_actions SET execution_status = ?, execution_details = ? WHERE id = ?",
+        ("executed" if succeeded else "failed", history, action_id),
+    )
+    append_audit_entry(
+        connection,
+        "remediation.process_termination_completed" if succeeded else "remediation.process_termination_failed",
+        "remediation_action",
+        action_id,
+        details,
+        created_at=now,
+    )
+    connection.commit()
+    if not succeeded:
+        error = RemediationExecutionError(failure)
+        if cause:
+            raise error from cause
+        raise error
+    return {
+        "action_id": action_id,
+        "process_id": pid,
+        "process_name": process_name,
+        "status": "completed",
+    }
